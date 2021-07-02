@@ -1,7 +1,12 @@
-use std::any::Any;
+extern crate rand;
 
+use std::any::Any;
+use std::thread;
+use std::sync::{RwLock, Arc};
 use std::net::{TcpListener, TcpStream};
-use std::io::{Read};
+use std::marker::PhantomData;
+use std::io::{Read, Write};
+use rand::prelude::*;
 
 pub fn teste() {
     println!("Teste")
@@ -14,6 +19,7 @@ pub const PJLINK_TERMINATOR: u8 = 0x0d; // carriage return
 pub const PJLINK_QUERY: u8 = '?' as u8;
 
 pub const PJLINK_NULLIFIED_SECURITY: &[u8; 9] = b"PJLINK 0\x0d";
+pub const PJLINK_SECURITY: &[u8; 9] = b"PJLINK 1 ";
 
 pub struct PjLinkRawPayload {
     header_and_class: [u8; 2],
@@ -105,44 +111,83 @@ pub enum PjLinkMuteType {
     Query,
 }
 
-pub trait PjLinkHandler {
-    fn new() -> Self;
+pub trait PjLinkHandler: Sync + Send  {
+    fn get_password(&mut self) -> Option<&String>;
     fn handle_command(&mut self, command: PjLinkCommand, raw_command: PjLinkRawPayload) -> PjLinkResponse;
 }
 
-pub struct PjLinkListener{
-    listener: TcpListener
+pub struct PjLinkListener<'a> {
+    _nil: &'a bool,
+    listener: TcpListener,
+    handler: Arc<RwLock<dyn PjLinkHandler>>,
 }
 
-impl PjLinkListener {
-    pub fn new() -> Self {
-        return PjLinkListener {listener: PjLinkListener::default_listener()};
+impl<'a> PjLinkListener<'a> {
+    pub fn new(
+        handler: impl PjLinkHandler + 'static,
+        listener: TcpListener,
+    ) -> PjLinkListener<'a> {
+        return PjLinkListener {
+            _nil: &false,
+            handler: Arc::new(RwLock::new(handler)),
+            listener: listener
+        };
     }
 
-    pub fn custom(listener: TcpListener) -> Self {
-        return PjLinkListener {listener};
-    }
-
-    fn default_listener() -> TcpListener {
-        return TcpListener::bind("127.0.0.1:4352").unwrap();
-    }
-
-    pub fn listen(&self) {
+    pub fn listen(&mut self) {
         for stream in self.listener.incoming() {
-            let stream = stream.unwrap();
+            match stream {
+                Ok(stream) => {
+                    let handler = self.handler.clone();
+                    thread::spawn(|| {
+                        let mut connection_handler = PjLinkConnectionHandler {handler};
+                        connection_handler.handle_connection(stream);
+                    });
+                },
+                Err(e) => println!("Error! {}", e)
+            }
+        }
+    }
+}
 
-            self.handle_connection(stream);
+struct PjLinkConnectionHandler {
+    handler: Arc<RwLock<dyn PjLinkHandler>>
+}
+
+impl PjLinkConnectionHandler{
+    fn handle_connection(&mut self, mut stream: TcpStream) {
+        let mut buffer = [0u8; 256];
+        let lock_handler = &self.handler;
+
+        if let Ok(mut ro_handler) = lock_handler.write() {
+            let password: Option<&String> = ro_handler.get_password();
+
+            if password.is_none() {
+                Self::generate_nullified_security(&mut buffer);
+            } else {
+                let number = Self::generate_random_number();
+                Self::generate_password_security(&mut buffer, number);
+            }
+
+            stream.write(&buffer).unwrap();
+            let mut s = String::new();
+            std::io::stdin().read_line(&mut s).unwrap();
+            stream.write(s.as_bytes()).unwrap();
+            stream.flush().unwrap();
         }
     }
 
-    fn handle_connection(&self, mut stream: TcpStream) {
-        let mut buffer = [0u8; 256];
-       
-        
+    fn generate_random_number() -> u32 {
+        let mut rng = rand::thread_rng();
+        return rng.next_u32()
     }
 
-    #[inline(always)]
-    fn generate_nullified_security(mut buffer: [u8; 256]) {
+    fn generate_nullified_security(buffer: &mut [u8; 256]) {
         buffer[0..9].copy_from_slice(PJLINK_NULLIFIED_SECURITY);
+    }
+
+    fn generate_password_security(buffer: &mut [u8; 256], number: u32) {
+        buffer[0..9].copy_from_slice(PJLINK_SECURITY);
+        buffer[10..17].copy_from_slice(format!("{:08X}", number).as_bytes());
     }
 }

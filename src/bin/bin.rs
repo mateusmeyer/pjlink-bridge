@@ -5,11 +5,14 @@ use pjlink_bridge::{
     PjLinkRawPayload,
     PjLinkResponse,
     PjLinkPowerCommandParameter,
-    PJLINK_HEADER_CHAR,
 };
 
+use std::net::TcpListener;
+
 pub fn main() {
-    let listener = PjLinkListener::new();
+    let handler = PjLinkMockProjector::new();
+    let tcp_listener = TcpListener::bind("127.0.0.1:4352").unwrap();
+    let mut listener: PjLinkListener = PjLinkListener::new(handler, tcp_listener);
     listener.listen();
 }
 
@@ -19,20 +22,25 @@ struct PjLinkMockProjectorState{
     power_on: PjLinkPowerCommandParameter
 }
 
-struct PjLinkMockProjector {
+struct PjLinkMockProjector<'a> {
+    password: Option<&'a String>,
     state: PjLinkMockProjectorState
 }
 
-impl PjLinkHandler for PjLinkMockProjector {
+impl PjLinkMockProjector<'_> {
     fn new() -> Self {
         return PjLinkMockProjector {
+            password: Option::None,
             state: PjLinkMockProjectorState {
                 power_on: PjLinkPowerCommandParameter::Off
             }
         }
     }
+}
 
-    fn handle_command(&mut self, command: PjLinkCommand, raw_command: PjLinkRawPayload) -> PjLinkResponse {
+impl PjLinkHandler for PjLinkMockProjector<'_> {
+
+    fn handle_command(&mut self, command: PjLinkCommand, _raw_command: PjLinkRawPayload) -> PjLinkResponse {
         return match command {
             PjLinkCommand::Power1(PjLinkPowerCommandParameter::On) => {
                 println!("Power On Projector");
@@ -50,5 +58,9 @@ impl PjLinkHandler for PjLinkMockProjector {
             }
             _ => PjLinkResponse::OutOfParameter
         }
+    }
+
+    fn get_password(&mut self) -> Option<&String> {
+        return self.password;
     }
 }
