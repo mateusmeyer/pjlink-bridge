@@ -4,7 +4,7 @@ use std::any::Any;
 use std::thread;
 use std::sync::{RwLock, Arc};
 use std::net::{TcpListener, TcpStream};
-use std::marker::PhantomData;
+use std::convert::TryFrom;
 use std::io::{Read, Write};
 use rand::prelude::*;
 
@@ -25,7 +25,7 @@ pub struct PjLinkRawPayload {
     header_and_class: [u8; 2],
     command_body: [u8; 4],
     separator: u8,
-    transmission_parameter: Box<[u8]>,
+    transmission_parameter: Vec<u8>,
     terminator: u8
 }
 
@@ -70,6 +70,7 @@ pub enum PjLinkCommand {
     SpeakerVolumeAdjustment2(bool),
     MicrophoneVolumeAdjustment2(bool),
     Freeze2(u8),
+    Unknown,
 }
 
 pub enum PjLinkStatusCommand {
@@ -85,6 +86,7 @@ pub enum PjLinkPowerCommandParameter {
     Off,
     On,
     Query,
+    Unknown,
 }
 
 pub enum PjLinkPowerCommandStatus {
@@ -159,8 +161,8 @@ impl PjLinkConnectionHandler{
         let mut buffer = [0u8; 256];
         let lock_handler = &self.handler;
 
-        if let Ok(mut ro_handler) = lock_handler.write() {
-            let password: Option<&String> = ro_handler.get_password();
+        if let Ok(mut handler) = lock_handler.write() {
+            let password: Option<&String> = handler.get_password();
 
             if password.is_none() {
                 Self::generate_nullified_security(&mut buffer);
@@ -170,11 +172,60 @@ impl PjLinkConnectionHandler{
             }
 
             stream.write(&buffer).unwrap();
-            let mut s = String::new();
-            std::io::stdin().read_line(&mut s).unwrap();
-            stream.write(s.as_bytes()).unwrap();
             stream.flush().unwrap();
+
+            let mut input_command_buffer = [0u8; 256];
+            stream.read(&mut input_command_buffer).unwrap();
+
+            let raw_command = self.to_raw_command(input_command_buffer);
+            let command = self.get_command(&raw_command);
+
+            handler.handle_command(command, raw_command);
         }
+    }
+
+    fn get_command(&self, raw_command: &PjLinkRawPayload) -> PjLinkCommand {
+        let transmission_parameter = &raw_command.transmission_parameter;
+        let class = [raw_command.header_and_class[1]];
+        let mut command_body_string = std::str::from_utf8(&class).unwrap().to_owned();
+        command_body_string.push_str(
+            std::str::from_utf8(&raw_command.command_body).unwrap()
+        );
+        let command_body_str = command_body_string.as_str();
+
+        return match command_body_str {
+            "1POWR" => {
+                let raw_parameter = transmission_parameter[0];
+                let parameter = match raw_parameter as char {
+                    '1' => PjLinkPowerCommandParameter::On,
+                    '0' => PjLinkPowerCommandParameter::Off,
+                    '?' => PjLinkPowerCommandParameter::Query,
+                    _ => PjLinkPowerCommandParameter::Unknown, 
+                };
+
+                return PjLinkCommand::Power1(parameter);
+            }
+            _ => PjLinkCommand::Unknown
+        }
+    }
+
+    fn to_raw_command(&self, command: [u8; 256]) -> PjLinkRawPayload {
+        let mut header_and_class: [u8; 2] = Default::default();
+        let mut command_body: [u8; 4] = Default::default();
+        let transmission_parameter: Vec<u8> = command[7..256].to_vec();
+
+        header_and_class.copy_from_slice(&command[0..2]);
+        command_body.copy_from_slice(&command[2..6]);
+
+        let command = PjLinkRawPayload {
+            header_and_class,
+            command_body,
+            separator: command[6],
+            transmission_parameter,
+            terminator: PJLINK_TERMINATOR
+        };
+
+        return command;
     }
 
     fn generate_random_number() -> u32 {
