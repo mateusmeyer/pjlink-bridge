@@ -9,5 +9,5 @@ edition = "2018"
 rand = "0.8.4"
 
 [[bin]]
-name = "pjlink-rs232-bridge-runner"
+name = "pjlink-mock-bridge-runner"
 path ="src/bin/bin.rs"
