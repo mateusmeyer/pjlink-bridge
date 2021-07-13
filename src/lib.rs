@@ -1,14 +1,19 @@
-extern crate rand;
+//!`pjlink-bridge` provides a base for implementing a full-featured PJLink server.
+//#![deny(missing_docs)]
 
 use std::thread;
-use std::sync::{RwLock, Arc};
-use std::net::{TcpListener, TcpStream};
+use std::sync::{Mutex, Arc};
+use std::net::{
+    TcpListener,
+    TcpStream,
+    UdpSocket,
+    SocketAddr
+};
+use std::io;
 use std::io::{Read, Write};
 use rand::prelude::*;
-
-pub fn teste() {
-    println!("Teste")
-}
+use mac_address::get_mac_address;
+use log::{info, warn, debug, trace};
 
 pub const PJLINK_HEADER: u8 = b'%';
 pub const PJLINK_COMMAND_SEPARATOR: u8 = 0x20; // space
@@ -19,19 +24,29 @@ pub const PJLINK_QUERY: u8 = PJLINK_QUERY_CHAR as u8;
 
 pub const PJLINK_NULLIFIED_SECURITY: &[u8; 9] = b"PJLINK 0\x0d";
 pub const PJLINK_SECURITY: &[u8; 9] = b"PJLINK 1 ";
+pub const PJLINK_SECURITY_ERRA: &[u8; 12] = b"PJLINK ERRA\x0d";
+
+pub const PJLINK_BROADCAST_SEARCH_START: &[u8; 7] = b"%2SRCH\x0d";
+pub const PJLINK_BROADCAST_MESSAGE_ACKN: &[u8; 4] = b"ACKN";
+pub const PJLINK_BROADCAST_MESSAGE_LKUP: &[u8; 4] = b"LKUP";
+pub const PJLINK_BROADCAST_MESSAGE_ERST: &[u8; 4] = b"ERST";
+pub const PJLINK_BROADCAST_MESSAGE_POWR: &[u8; 4] = b"POWR";
+pub const PJLINK_BROADCAST_MESSAGE_INPT: &[u8; 4] = b"INPT";
+
+pub const PJLINK_BROADCAST_SEARCH_RESPONSE: &[u8; 7] = b"%2ACKN=";
+
+/// The maximum size of UDP datagrams sent to the server.
+/// 
+/// Rust's UDPSocket implementation needs a fixed buffer size due to
+/// UDP nature, this is the maximum broadcast message size present
+/// on PJLink specification.
+pub const PJLINK_MAX_BROADCAST_BUFFER_SIZE: usize = 25;
 
 pub struct PjLinkRawPayload {
     header_and_class: [u8; 2],
     command_body: [u8; 4],
     separator: u8,
     transmission_parameter: Vec<u8>,
-    terminator: u8
-}
-
-pub struct PjLinkRawNoBodyPayload {
-    header_and_class: [u8; 2],
-    command_body: [u8; 4],
-    terminator: u8
 }
 
 pub enum PjLinkResponse {
@@ -41,7 +56,8 @@ pub enum PjLinkResponse {
     UnavailableTime,
     ProjectorOrDisplayFailure,
     OkSingle(u8),
-    OkMultiple(Vec<u8>)
+    OkMultiple(Vec<u8>),
+    OkEmpty
 }
 
 pub enum PjLinkPowerCommandParameter {
@@ -112,6 +128,31 @@ pub enum PjLinkMuteCommandParameter {
     Query,
     Unknown,
 }
+pub enum PjLinkVolumeCommandParameter {
+    Increase,
+    Decrase,
+    Unknown,
+}
+
+pub struct PjLinkInputResolutionCommandStatus;
+#[allow(non_upper_case_globals)]
+impl PjLinkInputResolutionCommandStatus {
+    pub const NoSignal: u8 = b'-';
+    pub const Unknown: u8 = b'*';
+}
+
+pub enum PjLinkFreezeCommandParameter {
+    Freeze,
+    Unfreeze,
+    Query,
+    Unknown,
+}
+pub struct PjLinkFreezeCommandStatus;
+#[allow(non_upper_case_globals)]
+impl PjLinkFreezeCommandStatus {
+    pub const Freezed: u8 = b'1';
+    pub const Unfreezed: u8 = b'0';
+}
 
 pub enum PjLinkCommand {
     Search2,
@@ -121,24 +162,24 @@ pub enum PjLinkCommand {
     AvMute1(PjLinkMuteCommandParameter),
     ErrorStatus1,
     Lamp1,
-    InputTogglingList1(u8),
-    InputTogglingList2(u8),
+    InputTogglingList1,
+    InputTogglingList2,
     Name1,
     InfoManufacturer1,
     InfoProductName1,
     InfoOther1,
     Class1,
-    SerialNumber2(u8),
-    SoftwareVersion2(u8),
-    InputTerminalName2(u8),
-    InputResolution2(u8),
-    RecommendResolution2(u8),
-    FilterUsageTime2(u8),
-    LampReplacementModelNumber2(u8),
-    FilterReplacementModelNumber2(u8),
-    SpeakerVolumeAdjustment2(bool),
-    MicrophoneVolumeAdjustment2(bool),
-    Freeze2(u8),
+    SerialNumber2,
+    SoftwareVersion2,
+    InputTerminalName2(PjLinkInputCommandParameter),
+    InputResolution2,
+    RecommendResolution2,
+    FilterUsageTime2,
+    LampReplacementModelNumber2,
+    FilterReplacementModelNumber2,
+    SpeakerVolumeAdjustment2(PjLinkVolumeCommandParameter),
+    MicrophoneVolumeAdjustment2(PjLinkVolumeCommandParameter),
+    Freeze2(PjLinkFreezeCommandParameter),
     Unknown,
 }
 
@@ -150,36 +191,102 @@ pub enum PjLinkStatusCommand {
     Input2(u8, u8),
 }
 
-
-pub trait PjLinkHandler: Sync + Send  {
-    fn get_password(&mut self) -> Option<&String>;
+pub trait PjLinkHandler: Sync + Send {
+    fn get_password(&mut self) -> Option<String>;
     fn handle_command(&mut self, command: PjLinkCommand, raw_command: &PjLinkRawPayload) -> PjLinkResponse;
+}
+
+pub type PjLinkHandlerShared = Arc<Mutex<dyn PjLinkHandler>>;
+
+pub struct PjLinkServer {}
+
+impl PjLinkServer{
+    pub fn listen_tcp_udp(
+        handler: PjLinkHandlerShared,
+        tcp_bind_address: String,
+        udp_bind_address: String,
+        port: String,
+    ) {
+        let tcp_listener = TcpListener::bind(format!("{}:{}", tcp_bind_address, port)).unwrap();
+
+        let udp_socket = UdpSocket::bind(format!("{}:{}", udp_bind_address, port)).unwrap();
+        let listener = PjLinkListener::new(handler, tcp_listener, udp_socket);
+        let udp_address_clone = udp_bind_address.clone();
+        let listener_clone = listener.clone();
+        
+        let handle = thread::spawn(move || {
+            Self::listen_tcp_internal(tcp_bind_address.clone(), listener.clone());
+        });
+
+        thread::spawn(move || {
+            println!("Running UDP Listener on {}:{}", udp_address_clone, port);
+            listener_clone.listen_multicast();
+        });
+
+        handle.join().unwrap();
+    }
+
+    pub fn listen_tcp_only(
+        handler: PjLinkHandlerShared,
+        tcp_bind_address: String,
+        port: String
+    ) {
+        let tcp_listener = TcpListener::bind(format!("{}:{}", tcp_bind_address, port)).unwrap();
+        let listener = PjLinkListener::new_without_broadcast(handler, tcp_listener);
+        
+        Self::listen_tcp_internal(tcp_bind_address, Arc::new(listener));
+    }
+
+    fn listen_tcp_internal(address: String, listener: PjLinkListenerShared<'static>) {
+        println!("Running TCP Listener on {}", address);
+        listener.listen();
+    }
 }
 
 pub struct PjLinkListener<'a> {
     _nil: &'a bool,
-    listener: TcpListener,
-    handler: Arc<RwLock<dyn PjLinkHandler>>,
+    shared_handler: PjLinkHandlerShared,
+    tcp_listener: TcpListener,
+    udp_socket: Option<UdpSocket>
 }
+
+pub type PjLinkListenerShared<'a> = Arc<PjLinkListener<'a>>;
 
 impl<'a> PjLinkListener<'a> {
     pub fn new(
-        handler: impl PjLinkHandler + 'static,
-        listener: TcpListener,
-    ) -> PjLinkListener<'a> {
-        return PjLinkListener {
+        shared_handler: PjLinkHandlerShared,
+        tcp_listener: TcpListener,
+        udp_socket: UdpSocket
+    ) -> PjLinkListenerShared<'a> {
+        return Arc::new(PjLinkListener {
             _nil: &false,
-            handler: Arc::new(RwLock::new(handler)),
-            listener: listener
-        };
+            shared_handler,
+            tcp_listener,
+            udp_socket: Option::Some(udp_socket),
+        });
     }
 
-    pub fn listen(&mut self) {
-        for stream in self.listener.incoming() {
+    pub fn new_without_broadcast(
+        shared_handler: Arc<Mutex<dyn PjLinkHandler>>,
+        tcp_listener: TcpListener
+    ) -> Self {
+        return PjLinkListener {
+            _nil: &false,
+            shared_handler,
+            tcp_listener,
+            udp_socket: Option::None,
+        }
+    }
+
+    pub fn listen(&self) {
+        let shared_handler = &self.shared_handler;
+        let listener = &self.tcp_listener;
+
+        for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let handler = self.handler.clone();
-                    thread::spawn(|| {
+                    let handler = shared_handler.clone();
+                    thread::spawn(move || {
                         let mut connection_handler = PjLinkConnectionHandler {handler};
                         connection_handler.handle_connection(stream);
                     });
@@ -188,63 +295,71 @@ impl<'a> PjLinkListener<'a> {
             }
         }
     }
+
+    pub fn listen_multicast(&self) {
+        let shared_handler = &self.shared_handler;
+        if let Some(socket) = &self.udp_socket {
+            socket.set_broadcast(true).unwrap();
+            let port = socket.local_addr().unwrap().port();
+
+            let handler = shared_handler.clone();
+            let mut connection_handler = PjLinkConnectionHandler {handler};
+            connection_handler.handle_connection_multicast(socket, port);
+        }
+    }
 }
 
 struct PjLinkConnectionHandler {
-    handler: Arc<RwLock<dyn PjLinkHandler>>
+    handler: Arc<Mutex<dyn PjLinkHandler>>,
 }
 
-impl PjLinkConnectionHandler{
+impl PjLinkConnectionHandler {
     fn handle_connection(&mut self, mut stream: TcpStream) {
-        let lock_handler = &self.handler;
+        let lock_handler = &self.handler; 
+        let mut use_auth = false;
+        let mut password_salt: Option<String> = Option::None;
+        let mut password: Option<String> = Option::None;
+        let mut has_authenticated = false;
 
-        if let Ok(mut handler) = lock_handler.write() {
-            let mut auth_buffer = Vec::<u8>::new();
-            let password: Option<&String> = handler.get_password();
-
-            if password.is_none() {
-                Self::generate_nullified_security(&mut auth_buffer);
-            } else {
-                let number = Self::generate_random_number();
-                Self::generate_password_security(&mut auth_buffer, number);
-            }
-
-            stream.write(&auth_buffer).unwrap();
-            stream.flush().unwrap();
+        if let Ok(mut handler) = lock_handler.lock() {
+            password = handler.get_password();
+            let (use_auth_result, password_salt_result) = Self::handle_password_input(&mut stream, &password);
+            use_auth = use_auth_result;
+            password_salt = password_salt_result;
         }
 
         'message: loop {
-            let mut input_command_buffer = Vec::<u8>::new();
-            'input: loop {
-                let mut char_buffer = [0u8; 1];
-                match stream.read_exact(&mut char_buffer) {
-                    Ok(_) => {
-                        if char_buffer[0] == PJLINK_TERMINATOR {
-                            break 'input;
+            let input_command_buffer = &mut Vec::<u8>::new();
+            if let Err(_) = Self::read_command(input_command_buffer, &mut stream) {
+                break 'message;
+            }
+
+            if (!has_authenticated && use_auth) || (use_auth && input_command_buffer[0] != PJLINK_HEADER) {
+                match Self::handle_password_hash_response(
+                    has_authenticated,
+                    input_command_buffer,
+                    &password,
+                    &password_salt,
+                    &mut stream,
+                ) {
+                    Ok(has_authenticated_response) => {
+                        if !has_authenticated_response {
+                            break 'message;
                         } else {
-                            input_command_buffer.extend(char_buffer);
+                            has_authenticated = true;
                         }
-                    }
-                    Err(_) => {
-                        break 'message;
-                    }
+                    },
+                    Err(_) => break 'message
                 }
             }
 
-            let raw_command = self.to_raw_command(input_command_buffer);
-            print!("Command:");
+            let raw_command = Self::to_raw_command(input_command_buffer);
+            let command = Self::get_command(&raw_command);
 
-            for byte in raw_command.command_body {
-                print!("{}", byte as char)
-            }
-            println!("");
-            
-            let command = self.get_command(&raw_command);
-
-            if let Ok(mut handler) = lock_handler.write() {
+            if let Ok(mut handler) = lock_handler.lock() {
                 let response = handler.handle_command(command, &raw_command);
-                let raw_response = self.to_raw_response(raw_command, response);
-                let output_buffer = self.write_to_buffer(raw_response);
+                let raw_response = Self::to_raw_response(raw_command, response);
+                let output_buffer = Self::write_to_buffer(raw_response);
                 match stream.write(&output_buffer) {
                     Ok(_) => {
                         match stream.flush() {
@@ -258,7 +373,69 @@ impl PjLinkConnectionHandler{
         }
     }
 
-    fn get_command(&self, raw_command: &PjLinkRawPayload) -> PjLinkCommand {
+    fn handle_connection_multicast(&mut self, stream: &UdpSocket, port: u16) {
+        'message: loop{
+            let mut input_command_buffer: Vec<u8> = Vec::new();
+            let mut input_command: Vec<u8> = Vec::new();
+            let mut message_origin: SocketAddr;
+            input_command_buffer.resize(PJLINK_MAX_BROADCAST_BUFFER_SIZE, 0);
+
+            match stream.recv_from(&mut input_command_buffer) {
+                Ok((_, origin)) => {
+                    let mut is_valid_command = false;
+
+                    trace!("UDP message received! RawMessage: {:?}", input_command_buffer);
+                    message_origin = origin;
+
+                    for char in input_command_buffer.iter() {
+                        input_command.push(*char);
+
+                        if *char == PJLINK_TERMINATOR {
+                            is_valid_command = true;
+                            break;
+                        }
+                    }
+
+                    if is_valid_command {
+                        debug!(
+                            "UDP message received! ParsedMessage: {:?}",
+                            String::from_utf8(input_command.clone()).unwrap_or(String::new())
+                        );
+                    } else {
+                        debug!("UDP message doesn't end with Carriage Return. Origin: {}", origin);
+                    }
+                }
+                Err(e) => {
+                    debug!("UDP message handling failed: {}", e);
+                    continue 'message;
+                }
+            }
+
+            if input_command == PJLINK_BROADCAST_SEARCH_START {
+                // TODO a way to get mac address by broadcast address' associated
+                // interface
+                let mac_address = match get_mac_address() {
+                    Ok(Some(mac)) => format!("{}", mac),
+                    Ok(None) | Err(_) => {
+                        debug!("UDP: 2SRCH: Cannot infer MAC Address, sending null");
+                        "00:00:00:00:00:00".to_string()
+                    }
+                };
+
+                let response = PjLinkRawPayload {
+                    header_and_class: [PJLINK_HEADER, b'2'],
+                    command_body: *PJLINK_BROADCAST_MESSAGE_ACKN,
+                    separator: PJLINK_RESPONSE_SEPARATOR,
+                    transmission_parameter: Vec::from(mac_address)
+                };
+
+                let output_buffer = Self::write_to_buffer(response);
+                Self::send_multicast_message(&mut message_origin, port, output_buffer);
+            }
+        }
+    }
+
+    fn get_command(raw_command: &PjLinkRawPayload) -> PjLinkCommand {
         let transmission_parameter = &raw_command.transmission_parameter;
         let class = raw_command.header_and_class[1];
         let mut command_body_string = std::str::from_utf8(&[class]).unwrap().to_owned();
@@ -281,13 +458,23 @@ impl PjLinkConnectionHandler{
 
                 return PjLinkCommand::Power1(parameter);
             },
-            "1CLSS" => PjLinkCommand::Class1,
-            "1ERST" => PjLinkCommand::ErrorStatus1,
-            "1LAMP" => PjLinkCommand::Lamp1,
-            "1INFO" => PjLinkCommand::InfoOther1,
-            "1INF1" => PjLinkCommand::InfoManufacturer1,
-            "1INF2" => PjLinkCommand::InfoProductName1,
-            "1NAME" => PjLinkCommand::Name1,
+            "1INPT" | "2INPT" => {
+                let parameter: PjLinkInputCommandParameter;
+                if transmission_parameter_len == 1 && transmission_parameter[0] == PJLINK_QUERY {
+                    parameter = PjLinkInputCommandParameter::Query
+                } else if transmission_parameter_len == 2 {
+                    let (input_char, input_value) = (transmission_parameter[0], transmission_parameter[1]);
+                    parameter = Self::input_param_parse(is_class_2, input_char, input_value);
+                } else {
+                    parameter = PjLinkInputCommandParameter::Unknown
+                };
+
+                return if is_class_2 {
+                    PjLinkCommand::Input2(parameter)
+                } else {
+                    PjLinkCommand::Input1(parameter)
+                }
+            }
             "1AVMT" => {
                 let parameter = if transmission_parameter_len == 1 && transmission_parameter[0] == PJLINK_QUERY {
                     PjLinkMuteCommandParameter::Query
@@ -308,38 +495,124 @@ impl PjLinkConnectionHandler{
 
                 return PjLinkCommand::AvMute1(parameter);
             }
-            "1INPT" | "2INPT" => {
-                let parameter = if transmission_parameter_len == 1 && transmission_parameter[0] == PJLINK_QUERY {
-                    PjLinkInputCommandParameter::Query
-                } else if transmission_parameter_len == 2 {
-                    let (input_char, input_value) = (transmission_parameter[0], transmission_parameter[1]);
-                    match input_char {
-                        b'1' => PjLinkInputCommandParameter::RGB(input_value),
-                        b'2' => PjLinkInputCommandParameter::Video(input_value),
-                        b'3' => PjLinkInputCommandParameter::Digital(input_value),
-                        b'4' => PjLinkInputCommandParameter::Network(input_value),
-                        b'5' => if is_class_2 {
-                            PjLinkInputCommandParameter::Internal(input_value)
-                        } else {
-                            PjLinkInputCommandParameter::Unknown
-                        }
-                        _ => PjLinkInputCommandParameter::Unknown
+            "1ERST" => PjLinkCommand::ErrorStatus1,
+            "1LAMP" => PjLinkCommand::Lamp1,
+            "1INST" | "2INST" => if is_class_2 {
+                PjLinkCommand::InputTogglingList2
+            } else {
+                PjLinkCommand::InputTogglingList1
+            }
+            "1NAME" => PjLinkCommand::Name1,
+            "1INF1" => PjLinkCommand::InfoManufacturer1,
+            "1INF2" => PjLinkCommand::InfoProductName1,
+            "1INFO" => PjLinkCommand::InfoOther1,
+            "1CLSS" => PjLinkCommand::Class1,
+            "2SNUM" => PjLinkCommand::SerialNumber2,
+            "2SVER" => PjLinkCommand::SoftwareVersion2,
+            "2INNM" => {
+                let parameter: PjLinkInputCommandParameter;
+                if transmission_parameter_len == 3 {
+                    if transmission_parameter[0] == PJLINK_QUERY {
+                        let (input_char, input_value) = (transmission_parameter[1], transmission_parameter[2]);
+                        parameter = Self::input_param_parse(true, input_char, input_value);
+                    } else {
+                        parameter = PjLinkInputCommandParameter::Unknown
                     }
                 } else {
-                    PjLinkInputCommandParameter::Unknown
+                    parameter = PjLinkInputCommandParameter::Unknown
                 };
 
-                return if is_class_2 {
-                    PjLinkCommand::Input2(parameter)
-                } else {
-                    PjLinkCommand::Input1(parameter)
+                return PjLinkCommand::InputTerminalName2(parameter);
+            },
+            "2IRES" => PjLinkCommand::InputResolution2,
+            "2RRES" => PjLinkCommand::RecommendResolution2,
+            "2FILT" => PjLinkCommand::FilterUsageTime2,
+            "2RLMP" => PjLinkCommand::LampReplacementModelNumber2,
+            "2RFIL" => PjLinkCommand::FilterReplacementModelNumber2,
+            "2SVOL" => {
+                if transmission_parameter_len == 1 {
+                    let is_increase = transmission_parameter[0] == b'1';
+                    let is_decrease = transmission_parameter[0] == b'0';
+                    return PjLinkCommand::SpeakerVolumeAdjustment2(if is_increase {
+                        PjLinkVolumeCommandParameter::Increase
+                    } else if is_decrease {
+                        PjLinkVolumeCommandParameter::Decrase
+                    } else {
+                        PjLinkVolumeCommandParameter::Unknown
+                    })
                 }
-            }
+
+                return PjLinkCommand::Unknown;
+            },
+            "2MVOL" => {
+                if transmission_parameter_len == 1 {
+                    let is_increase = transmission_parameter[0] == b'1';
+                    let is_decrease = transmission_parameter[0] == b'0';
+                    return PjLinkCommand::MicrophoneVolumeAdjustment2(if is_increase {
+                        PjLinkVolumeCommandParameter::Increase
+                    } else if is_decrease {
+                        PjLinkVolumeCommandParameter::Decrase
+                    } else {
+                        PjLinkVolumeCommandParameter::Unknown
+                    })
+                }
+
+                return PjLinkCommand::Unknown;
+            },
+            "2FREZ" => {
+                if transmission_parameter_len == 1 {
+                    if transmission_parameter[0] == PJLINK_QUERY {
+                        return PjLinkCommand::Freeze2(PjLinkFreezeCommandParameter::Query);
+                    } else {
+                        let is_freeze = transmission_parameter[0] == b'1';
+                        let is_unfreeze = transmission_parameter[0] == b'0';
+                        return PjLinkCommand::Freeze2(if is_freeze {
+                            PjLinkFreezeCommandParameter::Freeze
+                        } else if is_unfreeze {
+                            PjLinkFreezeCommandParameter::Unfreeze
+                        } else {
+                            PjLinkFreezeCommandParameter::Unknown
+                        })
+                    }
+                }
+
+                return PjLinkCommand::Unknown;
+            },
             _ => PjLinkCommand::Unknown
         }
     }
 
-    fn to_raw_response(&self, raw_command: PjLinkRawPayload, response: PjLinkResponse) -> PjLinkRawPayload {
+    fn input_param_parse(
+        is_class_2: bool,
+        input_char: u8,
+        input_value: u8,
+    ) -> PjLinkInputCommandParameter {
+        let is_invalid_below = input_value < b'1';
+        let is_class_1_invalid_higher = !is_class_2 && (input_value > b'9');
+        let is_class_2_invalid_higher = is_class_2
+                                        && ((input_value > b'9' && input_value < b'A')
+                                            || input_value > b'Z');
+
+        if  is_invalid_below || is_class_1_invalid_higher || is_class_2_invalid_higher {
+            PjLinkInputCommandParameter::Unknown                        
+        } else {
+            match input_char {
+                b'1' => PjLinkInputCommandParameter::RGB(input_value),
+                b'2' => PjLinkInputCommandParameter::Video(input_value),
+                b'3' => PjLinkInputCommandParameter::Digital(input_value),
+                b'4' => PjLinkInputCommandParameter::Storage(input_value),
+                b'5' => PjLinkInputCommandParameter::Network(input_value),
+                b'6' => if is_class_2 {
+                    PjLinkInputCommandParameter::Internal(input_value)
+                } else {
+                    PjLinkInputCommandParameter::Unknown
+                }
+                _ => PjLinkInputCommandParameter::Unknown
+            }
+        } 
+    }
+
+    fn to_raw_response(raw_command: PjLinkRawPayload, response: PjLinkResponse) -> PjLinkRawPayload {
         let header_and_class: [u8; 2] = raw_command.header_and_class;
         let command_body: [u8; 4] = raw_command.command_body;
         let separator: u8 = PJLINK_RESPONSE_SEPARATOR;
@@ -351,6 +624,7 @@ impl PjLinkConnectionHandler{
             PjLinkResponse::Undefined => Vec::from("ERR1"),
             PjLinkResponse::OkSingle(response_value) => Vec::from([response_value]),
             PjLinkResponse::OkMultiple(response_value) => Vec::from(response_value),
+            PjLinkResponse::OkEmpty => Vec::new(),
         };
 
         return PjLinkRawPayload {
@@ -358,11 +632,10 @@ impl PjLinkConnectionHandler{
             command_body,
             separator,
             transmission_parameter,
-            terminator: PJLINK_TERMINATOR
         };
     }
 
-    fn to_raw_command(&self, command: Vec<u8>) -> PjLinkRawPayload {
+    fn to_raw_command(command: &mut Vec<u8>) -> PjLinkRawPayload {
         let mut header_and_class: [u8; 2] = Default::default();
         let mut command_body: [u8; 4] = Default::default();
         let transmission_parameter: Vec<u8> = command[7..command.len()].to_vec();
@@ -375,13 +648,12 @@ impl PjLinkConnectionHandler{
             command_body,
             separator: command[6],
             transmission_parameter,
-            terminator: PJLINK_TERMINATOR
         };
 
         return command;
     }
 
-    fn write_to_buffer(&self, mut raw_response: PjLinkRawPayload) -> Vec<u8> {
+    fn write_to_buffer(mut raw_response: PjLinkRawPayload) -> Vec<u8> {
         let mut buffer = Vec::<u8>::new();
         buffer.extend(&raw_response.header_and_class);
         buffer.extend(&raw_response.command_body);
@@ -399,6 +671,122 @@ impl PjLinkConnectionHandler{
         return buffer;
     }
 
+    fn read_command(input_command_buffer: &mut Vec<u8>, stream: &mut TcpStream) -> Result<(), io::Error> {
+        loop {
+            let mut char_buffer = [0u8; 1];
+            match stream.read_exact(&mut char_buffer) {
+                Ok(_) => {
+                    if char_buffer[0] == PJLINK_TERMINATOR {
+                        return Result::Ok(());
+                    } else {
+                        input_command_buffer.extend(char_buffer);
+                    }
+                }
+                Err(e) => {
+                    return Result::Err(e);
+                }
+            }
+        }
+    }
+
+    fn send_multicast_message(message_origin: &mut SocketAddr, port: u16, output_buffer: Vec<u8>) {
+        match UdpSocket::bind("0.0.0.0:0") {
+            Ok(socket) => {
+                &message_origin.set_port(port);
+
+                debug!("UDP: Will send response to: {}", message_origin);
+                if let Err(e) = socket.connect(*message_origin) {
+                    debug!("UDP: Error on connecting to remote host. {}", e);
+                };
+
+                if let Err(e) = socket.send(&output_buffer) {
+                    debug!("UDP: Error on sending datagram message to remote host. {}", e);
+                }
+
+                trace!(
+                    "UDP message sent! RawParsedMessage: {:?}",
+                    output_buffer
+                );
+
+                debug!(
+                    "UDP message sent! ParsedMessage: {:?}",
+                    String::from_utf8(output_buffer).unwrap_or(String::new())
+                );
+            },
+            Err(e) => {
+                debug!("UDP: Error on opening local port to send response. {}", e);
+            }
+        }
+ 
+    }
+
+    fn handle_password_input(
+        stream: &mut TcpStream,
+        password: &Option<String>
+    ) -> (bool, Option<String>) {
+        let mut auth_buffer = Vec::<u8>::new();
+        let mut password_salt = Option::None;
+        let mut use_auth = false;
+
+        if password.is_none() {
+            Self::generate_nullified_security(&mut auth_buffer);
+        } else {
+            let string_salt = format!("{:08X}", Self::generate_random_number());
+            Self::generate_password_security(&mut auth_buffer, &string_salt);
+            password_salt = Option::Some(string_salt);
+            use_auth = true;
+        }
+
+        stream.write(&auth_buffer).unwrap();
+        stream.flush().unwrap();
+
+        return (use_auth, password_salt);
+    }
+
+    fn handle_password_hash_response(
+        has_authenticated: bool,
+        input_command_buffer: &mut Vec<u8>,
+        password: &Option<String>,
+        password_salt: &Option<String>,
+        stream: &mut TcpStream
+    ) -> Result<bool, io::Error> {
+        let mut auth_error = false;
+        let mut has_authenticated_response = has_authenticated;
+
+        if !has_authenticated {
+            if input_command_buffer.len() > 32 {
+                let mut input_password_hash: [u8; 32] = [0u8; 32];
+                input_password_hash.copy_from_slice(&input_command_buffer[0..32]);
+                let mut internal_password_string = password_salt.clone()
+                    .unwrap();
+                internal_password_string.push_str(&(password.clone().unwrap()));
+                let internal_password = internal_password_string.as_bytes();
+                let internal_password_hash = md5::compute(internal_password);
+
+                if format!("{:x}", internal_password_hash).as_bytes() == input_password_hash {
+                    has_authenticated_response = true;
+                } else {
+                    auth_error = true;
+                }
+            } else {
+                auth_error = true;
+            }
+
+            if auth_error {
+                match stream.write(PJLINK_SECURITY_ERRA) {
+                    Ok(_) => return Result::Ok(false),
+                    Err(e) => return Result::Err(e)
+                }
+            }
+        }
+        
+        if has_authenticated {
+            input_command_buffer.drain(0..32);
+        }
+
+        return Result::Ok(has_authenticated_response);
+    }
+
     fn generate_random_number() -> u32 {
         let mut rng = rand::thread_rng();
         return rng.next_u32()
@@ -408,8 +796,8 @@ impl PjLinkConnectionHandler{
         buffer.extend(PJLINK_NULLIFIED_SECURITY);
     }
 
-    fn generate_password_security(buffer: &mut Vec<u8>, number: u32) {
+    fn generate_password_security(buffer: &mut Vec<u8>, number: &String) {
         buffer.extend(PJLINK_SECURITY);
-        buffer.extend(format!("{:08X}", number).as_bytes());
+        buffer.extend(number.as_bytes());
     }
 }
