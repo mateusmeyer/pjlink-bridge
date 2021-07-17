@@ -1,8 +1,31 @@
 //!`pjlink-bridge` provides a base for implementing a full-featured PJLink server.
+//! 
+//! It's implemented based on [PJLink Specifications, Version 2.00](https://pjlink.jbmia.or.jp/english/data_cl2/PJLink_5-1.pdf).
+//! 
+//! Provides the following functionalities:
+//! * [PjLinkServer](self::PjLinkServer): Spawns necessary TCP and UDP connections and listens to requests using [PjLinkListener](self::PjLinkListener).
+//! * [PjLinkHandler](self::PjLinkHandler): Base trait for handling PJLink messages. This is implemented by who is using `pjlink-bridge`.
+//! * [PjLinkListener](self::PjLinkListener): Listens to PJLink TCP (and UDP, if used) requests using provided connections.
+//! 
+//! # External Dependencies
+//! * [rand](rand): to generate random numbers (used in PJLink Authentication procedure).
+//! * [md5](md5): to calculate md5 hashes (used in PJLink Authentication procedure).
+//! * [mac_address](mac_address): to get MAC address of network interface (used in PJLink Class 2 Search/Lookup procedures).
+//! * [log](log)
+//! 
+//! # Useful Links
+//! * [JBMIA's PJLink Class2 specification, manual and test software](https://pjlink.jbmia.or.jp/english/dl_class2.html): Contains related documents and tools,
+//! including the PJLinkTEST4PJ software, that can be used as a test client.
+
 //#![deny(missing_docs)]
 
 use std::thread;
-use std::sync::{Mutex, Arc};
+use std::sync::{
+    Mutex,
+    Arc,
+    atomic,
+    atomic::AtomicU64
+};
 use std::net::{
     TcpListener,
     TcpStream,
@@ -15,49 +38,243 @@ use rand::prelude::*;
 use mac_address::get_mac_address;
 use log::{info, warn, debug, trace};
 
+/// PJLink header character (%).
+/// 
+/// Every PJLink message (except authentication hello) starts with this
+/// character.
 pub const PJLINK_HEADER: u8 = b'%';
+/// PJLink command separator (0x20, space)
+/// 
+/// Messages coming from controller to projector use this character to
+/// separate command body from transmission parameter.
+/// 
+/// ### Command example
+/// ```"%1INPT 32\x0d"```
 pub const PJLINK_COMMAND_SEPARATOR: u8 = 0x20; // space
+/// PJLink response separator (=)
+/// 
+/// Messages coming from projector to controller (responses) use this
+/// character to separate command body from transmission parameter.
+/// 
+/// ### Response example
+/// ```"%2FREZ=OK\x0d"```
 pub const PJLINK_RESPONSE_SEPARATOR: u8 = 0x3d; // =
+/// PJLink terminator/end of sequence (0x0d, carriage return)
+/// 
+/// All PJLink messages must end with this character.
 pub const PJLINK_TERMINATOR: u8 = b'\x0d'; // carriage return
+/// PJLink query character (?), as char
+/// 
+/// All query requests use this chararcter to indicate a query request.
 pub const PJLINK_QUERY_CHAR: char = '?';
+/// PJLink query character (?), as u8
+/// 
+/// All query requests use this chararcter to indicate a query request.
 pub const PJLINK_QUERY: u8 = PJLINK_QUERY_CHAR as u8;
 
-pub const PJLINK_NULLIFIED_SECURITY: &[u8; 9] = b"PJLINK 0\x0d";
-pub const PJLINK_SECURITY: &[u8; 9] = b"PJLINK 1 ";
-pub const PJLINK_SECURITY_ERRA: &[u8; 12] = b"PJLINK ERRA\x0d";
+/// PJLink nullified security header (PJLINK 0\x0d)
+/// 
+/// If the projector does not have authentication, this header is returned
+/// to controller. Afterwards, controller can send requests without
+/// password.
+const PJLINK_NULLIFIED_SECURITY: &[u8; 9] = b"PJLINK 0\x0d";
+/// PJLink authentication header (PJLINK 1 )
+/// 
+/// If the projector does have authentication, this header is returned
+/// to controller with a hash (see PJLink specification). Afterwards,
+/// controller sends first request with a hashed MD5 salt+password.
+const PJLINK_SECURITY: &[u8; 9] = b"PJLINK 1 ";
+/// PJLink authentication error (PJLINK ERRA\x0d)
+/// 
+/// Controller returned with an invalid or wrong password hash.
+const PJLINK_SECURITY_ERRA: &[u8; 12] = b"PJLINK ERRA\x0d";
 
-pub const PJLINK_BROADCAST_SEARCH_START: &[u8; 7] = b"%2SRCH\x0d";
+/// PJLink Class 2 broadcast search start (%2SRCH\x0d)
+/// 
+/// This is the message sent from controller to the projector over
+/// UDP on broadcast address for querying all Class 2 projectors on local
+/// network. This command doesn't use a command separator.
+const PJLINK_BROADCAST_SEARCH_START: &[u8; 7] = b"%2SRCH\x0d";
+/// PJLink Class 2 Acknoledge broadcast command body (ACKN)
+/// 
+/// This is the command body used for response message to broadcast
+/// search request.
+/// 
+/// ### Usage in response string
+/// ```"%2ACKN=00:00:00:00:00:00\x0d"```
 pub const PJLINK_BROADCAST_MESSAGE_ACKN: &[u8; 4] = b"ACKN";
+/// PJLink Class 2 Lookup Notify command body (LKUP)
+/// 
+/// This is the command body used for spontaneous lookup message from projector
+/// to controller.
+/// 
+/// ### Usage in response string
+/// ```"%2LKUP=00:00:00:00:00:00\x0d"```
 pub const PJLINK_BROADCAST_MESSAGE_LKUP: &[u8; 4] = b"LKUP";
+/// PJLink Class 2 Error Status Notify command body (ERST)
+/// 
+/// This is the command body used for spontaneous error status change message
+/// from projector to controller.
+/// 
+/// ### Usage in response string
+/// ```"%2ERST=001000\x0d"```
 pub const PJLINK_BROADCAST_MESSAGE_ERST: &[u8; 4] = b"ERST";
+/// PJLink Class 2 Power Status Notify command body (POWR)
+/// 
+/// This is the command body used for spontaneous power status change message
+/// from projector to controller.
+/// 
+/// ### Usage in response string
+/// ```"%2POWR=1\x0d"```
 pub const PJLINK_BROADCAST_MESSAGE_POWR: &[u8; 4] = b"POWR";
+/// PJLink Class 2 Input Notiy command body (POWER)
+/// 
+/// This is the command body used for spontaneous input change message
+/// from projector to controller.
+/// 
+/// ### Usage in response string
+/// ```"%2INPT=32\x0d"```
 pub const PJLINK_BROADCAST_MESSAGE_INPT: &[u8; 4] = b"INPT";
-
-pub const PJLINK_BROADCAST_SEARCH_RESPONSE: &[u8; 7] = b"%2ACKN=";
 
 /// The maximum size of UDP datagrams sent to the server.
 /// 
 /// Rust's UDPSocket implementation needs a fixed buffer size due to
 /// UDP nature, this is the maximum broadcast message size present
 /// on PJLink specification.
-pub const PJLINK_MAX_BROADCAST_BUFFER_SIZE: usize = 25;
+const PJLINK_MAX_BROADCAST_BUFFER_SIZE: usize = 25;
 
+/// PJLink Command/Response Line
+/// 
+/// This struct aims to match the PJLink's Command Line and Response Line,
+/// without the [terminator](self::PJLINK_TERMINATOR).
+/// 
+/// ## Examples
+/// ### Using [```new_command()```](PjLinkPayload::new_command)
+/// ```
+/// use pjlink_bridge::*;
+/// 
+/// fn main() {
+///     let payload = PjLinkPayload::new_command(b'1', *b"POWR", vec![PJLINK_QUERY]);
+/// }
+/// ```
+/// ### Using [```new_response()```](PjLinkPayload::new_response)
+/// ```
+/// use pjlink_bridge::*;
+/// 
+/// fn main() {
+///     let payload = PjLinkPayload::new_response(b'1', *b"POWR", vec![b'0']);
+/// }
+/// ```
+/// ### Struct instantianion 
+/// ```
+/// use pjlink_bridge::*;
+/// 
+/// fn main() {
+///     let payload = PjLinkPayload {
+///         header_and_class: [PJLINK_HEADER, b'1'],
+///         command_body: *b"POWR",
+///         separator: PJLINK_COMMAND_SEPARATOR,
+///         transmission_parameter: vec![PJLINK_QUERY]
+///     }
+/// }
+/// ```
 pub struct PjLinkRawPayload {
+    /// Combines [PJLink's header](self::PJLINK_HEADER) and command class together.
+    /// 
     header_and_class: [u8; 2],
     command_body: [u8; 4],
     separator: u8,
     transmission_parameter: Vec<u8>,
 }
 
+impl PjLinkRawPayload {
+    /// Utility method for generating a PJLink Command line (uses 
+    /// [PJLINK_COMMAND_SEPARATOR](self::PJLINK_COMMAND_SEPARATOR) as separator)
+    /// 
+    /// Arguments:
+    /// * `class`: PJLink command class. Either `b'1'` or `b'2'`.
+    /// * `command_body`: PJLink command body. Value example: `*b"POWR"`
+    /// * `transmission_parameter`: PJLink transmission parameter.`
+    pub fn new_command(
+        class: u8,
+        command_body: [u8; 4],
+        transmission_parameter: Vec<u8>
+    ) -> PjLinkRawPayload {
+        return PjLinkRawPayload {
+            header_and_class: [PJLINK_HEADER, class],
+            command_body,
+            separator: PJLINK_COMMAND_SEPARATOR,
+            transmission_parameter
+        };
+    }
+
+    /// Utility method for generating a PJLink Response line (uses 
+    /// [PJLINK_RESPONSE_SEPARATOR](self::PJLINK_RESPONSE_SEPARATOR) as
+    /// separator)
+    /// 
+    /// Arguments:
+    /// * `class`: PJLink command class. Either `b'1'` or `b'2'`.
+    /// * `command_body`: PJLink command body. Value example: `*b"POWR"`
+    /// * `transmission_parameter`: PJLink transmission parameter.`
+    pub fn new_response(
+        class: u8,
+        command_body: [u8; 4],
+        transmission_parameter: Vec<u8>
+    ) -> PjLinkRawPayload {
+        return PjLinkRawPayload {
+            header_and_class: [PJLINK_HEADER, class],
+            command_body,
+            separator: PJLINK_RESPONSE_SEPARATOR,
+            transmission_parameter
+        };
+    }
+}
+
+/// PJLink Response Transmission parameter
+/// 
+/// It's used as a response to [PjLinkCommand](self::PjLinkCommand) commands.
 pub enum PjLinkResponse {
+    /// Matches a PJLink Successful execution (```OK```) response parameter
+    /// 
+    /// ### As used in:
+    /// ```%1POWR=OK```
     Ok,
+    /// Matches a PJLink Undefined command (```ERR1```) response parameter.
+    /// 
+    /// ### As used in:
+    /// ```%1NONE=ERR1```
     Undefined,
+    /// Matches a PJLink Out of parameter (```ERR2```) response parameter.
+    /// 
+    /// ### As used in:
+    /// ```%1INPT=ERR2```
     OutOfParameter,
+    /// Matches a PJLink Unavailable time (```ERR3```) response parameter.
+    /// 
+    /// ### As used in:
+    /// ```%1INPT=ERR3```
     UnavailableTime,
+    /// Matches a PJLink Projector/Display failure (```ERR4```) response
+    /// parameter.
+    /// 
+    /// ### As used in:
+    /// ```%1INPT=ERR4```
     ProjectorOrDisplayFailure,
-    OkSingle(u8),
-    OkMultiple(Vec<u8>),
-    OkEmpty
+    /// A single character response parameter.
+    /// 
+    /// ### As used in:
+    /// ```%1POWR=1```
+    Single(u8),
+    /// A multiple character response parameter.
+    /// 
+    /// ### As used in:
+    /// ```%2INPT=2B```
+    Multiple(Vec<u8>),
+    /// An empty response parameter.
+    /// 
+    /// ### As used in:
+    /// ```%2SVER=```
+    Empty
 }
 
 pub enum PjLinkPowerCommandParameter {
@@ -219,7 +436,7 @@ impl PjLinkServer{
         });
 
         thread::spawn(move || {
-            println!("Running UDP Listener on {}:{}", udp_address_clone, port);
+            info!("Running UDP Listener on {}:{}", udp_address_clone, port);
             listener_clone.listen_multicast();
         });
 
@@ -238,7 +455,7 @@ impl PjLinkServer{
     }
 
     fn listen_tcp_internal(address: String, listener: PjLinkListenerShared<'static>) {
-        println!("Running TCP Listener on {}", address);
+        info!("Running TCP Listener on {}", address);
         listener.listen();
     }
 }
@@ -246,6 +463,7 @@ impl PjLinkServer{
 pub struct PjLinkListener<'a> {
     _nil: &'a bool,
     shared_handler: PjLinkHandlerShared,
+    shared_connection_counter: Arc<AtomicU64>,
     tcp_listener: TcpListener,
     udp_socket: Option<UdpSocket>
 }
@@ -261,6 +479,7 @@ impl<'a> PjLinkListener<'a> {
         return Arc::new(PjLinkListener {
             _nil: &false,
             shared_handler,
+            shared_connection_counter: Arc::new(AtomicU64::new(0)),
             tcp_listener,
             udp_socket: Option::Some(udp_socket),
         });
@@ -273,6 +492,7 @@ impl<'a> PjLinkListener<'a> {
         return PjLinkListener {
             _nil: &false,
             shared_handler,
+            shared_connection_counter: Arc::new(AtomicU64::new(0)),
             tcp_listener,
             udp_socket: Option::None,
         }
@@ -286,12 +506,17 @@ impl<'a> PjLinkListener<'a> {
             match stream {
                 Ok(stream) => {
                     let handler = shared_handler.clone();
+                    let shared_connection_counter = self.shared_connection_counter.clone();
+
                     thread::spawn(move || {
-                        let mut connection_handler = PjLinkConnectionHandler {handler};
+                        let mut connection_handler = PjLinkConnectionHandler {
+                            handler,
+                            shared_connection_counter,
+                        };
                         connection_handler.handle_connection(stream);
                     });
                 },
-                Err(e) => println!("Error! {}", e)
+                Err(e) => debug!("Error on received connection! {}", e)
             }
         }
     }
@@ -301,9 +526,13 @@ impl<'a> PjLinkListener<'a> {
         if let Some(socket) = &self.udp_socket {
             socket.set_broadcast(true).unwrap();
             let port = socket.local_addr().unwrap().port();
+            let shared_connection_counter = self.shared_connection_counter.clone();
 
             let handler = shared_handler.clone();
-            let mut connection_handler = PjLinkConnectionHandler {handler};
+            let mut connection_handler = PjLinkConnectionHandler {
+                handler,
+                shared_connection_counter,
+            };
             connection_handler.handle_connection_multicast(socket, port);
         }
     }
@@ -311,6 +540,7 @@ impl<'a> PjLinkListener<'a> {
 
 struct PjLinkConnectionHandler {
     handler: Arc<Mutex<dyn PjLinkHandler>>,
+    shared_connection_counter: Arc<AtomicU64>
 }
 
 impl PjLinkConnectionHandler {
@@ -320,27 +550,32 @@ impl PjLinkConnectionHandler {
         let mut password_salt: Option<String> = Option::None;
         let mut password: Option<String> = Option::None;
         let mut has_authenticated = false;
+        let connection_id = (*self.shared_connection_counter).fetch_add(1, atomic::Ordering::SeqCst);
 
         if let Ok(mut handler) = lock_handler.lock() {
             password = handler.get_password();
-            let (use_auth_result, password_salt_result) = Self::handle_password_input(&mut stream, &password);
+            let (use_auth_result, password_salt_result) = Self::handle_password_input(&mut stream, &password, &connection_id);
             use_auth = use_auth_result;
             password_salt = password_salt_result;
         }
 
         'message: loop {
-            let input_command_buffer = &mut Vec::<u8>::new();
-            if let Err(_) = Self::read_command(input_command_buffer, &mut stream) {
+            let mut input_command_buffer = Vec::<u8>::new();
+            debug!("Waiting for command! MessageId: {}, Host: {}", connection_id, stream.peer_addr().unwrap());
+
+            if let Err(e) = Self::read_command(&mut input_command_buffer, &mut stream, &connection_id) {
+                debug!("Failed to read command! MessageId: {}, {}", connection_id, e);
                 break 'message;
             }
 
             if (!has_authenticated && use_auth) || (use_auth && input_command_buffer[0] != PJLINK_HEADER) {
                 match Self::handle_password_hash_response(
                     has_authenticated,
-                    input_command_buffer,
+                    &mut input_command_buffer,
                     &password,
                     &password_salt,
                     &mut stream,
+                    &connection_id
                 ) {
                     Ok(has_authenticated_response) => {
                         if !has_authenticated_response {
@@ -349,25 +584,34 @@ impl PjLinkConnectionHandler {
                             has_authenticated = true;
                         }
                     },
-                    Err(_) => break 'message
+                    Err(e) => {
+                        debug!("Error while checking authentication! MessageId: {}, {}", connection_id, e);
+                        break 'message
+                    }
                 }
             }
 
-            let raw_command = Self::to_raw_command(input_command_buffer);
+            let raw_command = Self::to_raw_command(&mut input_command_buffer, &connection_id);
             let command = Self::get_command(&raw_command);
 
             if let Ok(mut handler) = lock_handler.lock() {
                 let response = handler.handle_command(command, &raw_command);
-                let raw_response = Self::to_raw_response(raw_command, response);
+                let raw_response = Self::to_raw_response(raw_command, response, &connection_id);
                 let output_buffer = Self::write_to_buffer(raw_response);
                 match stream.write(&output_buffer) {
                     Ok(_) => {
                         match stream.flush() {
                             Ok(_) => continue 'message,
-                            Err(_) => break 'message
+                            Err(e) => {
+                                debug!("Error when flushing socket: MessageId: {}, {}", connection_id, e);
+                                break 'message;
+                            }
                         }
                     }
-                    Err(_) => break 'message
+                    Err(e) => {
+                        warn!("Failed to lock PjLinkHandler: MessageId: {}, {}", connection_id, e);
+                        break 'message;
+                    }
                 }
             }
         }
@@ -612,7 +856,7 @@ impl PjLinkConnectionHandler {
         } 
     }
 
-    fn to_raw_response(raw_command: PjLinkRawPayload, response: PjLinkResponse) -> PjLinkRawPayload {
+    fn to_raw_response(raw_command: PjLinkRawPayload, response: PjLinkResponse, connection_id: &u64) -> PjLinkRawPayload {
         let header_and_class: [u8; 2] = raw_command.header_and_class;
         let command_body: [u8; 4] = raw_command.command_body;
         let separator: u8 = PJLINK_RESPONSE_SEPARATOR;
@@ -622,10 +866,19 @@ impl PjLinkConnectionHandler {
             PjLinkResponse::UnavailableTime => Vec::from("ERR3"),
             PjLinkResponse::ProjectorOrDisplayFailure => Vec::from("ERR4"),
             PjLinkResponse::Undefined => Vec::from("ERR1"),
-            PjLinkResponse::OkSingle(response_value) => Vec::from([response_value]),
-            PjLinkResponse::OkMultiple(response_value) => Vec::from(response_value),
-            PjLinkResponse::OkEmpty => Vec::new(),
+            PjLinkResponse::Single(response_value) => Vec::from([response_value]),
+            PjLinkResponse::Multiple(response_value) => Vec::from(response_value),
+            PjLinkResponse::Empty => Vec::new(),
         };
+        
+        debug!(
+            "Parsed Response: MessageId: {}, HeaderClass: {}, CmdBody: {}, Sep: {}, TxParam: {}",
+            *connection_id,
+            String::from_utf8(header_and_class.to_vec()).unwrap_or(String::new()),
+            String::from_utf8(command_body.to_vec()).unwrap_or(String::new()),
+            separator as char,
+            String::from_utf8(transmission_parameter.clone()).unwrap_or(String::new()),
+        );
 
         return PjLinkRawPayload {
             header_and_class,
@@ -635,7 +888,7 @@ impl PjLinkConnectionHandler {
         };
     }
 
-    fn to_raw_command(command: &mut Vec<u8>) -> PjLinkRawPayload {
+    fn to_raw_command(command: &mut Vec<u8>, connection_id: &u64) -> PjLinkRawPayload {
         let mut header_and_class: [u8; 2] = Default::default();
         let mut command_body: [u8; 4] = Default::default();
         let transmission_parameter: Vec<u8> = command[7..command.len()].to_vec();
@@ -649,6 +902,15 @@ impl PjLinkConnectionHandler {
             separator: command[6],
             transmission_parameter,
         };
+
+        debug!(
+            "Parsed command. MessageId: {}; HeaderClass: {}; CmdBody: {}; Sep: {}, TxParam: {}",
+            *connection_id,
+            String::from_utf8(command.header_and_class.to_vec()).unwrap_or(String::new()),
+            String::from_utf8(command.command_body.to_vec()).unwrap_or(String::new()),
+            command.separator as char,
+            String::from_utf8(command.transmission_parameter.to_vec()).unwrap_or(String::new()),
+        );
 
         return command;
     }
@@ -671,11 +933,12 @@ impl PjLinkConnectionHandler {
         return buffer;
     }
 
-    fn read_command(input_command_buffer: &mut Vec<u8>, stream: &mut TcpStream) -> Result<(), io::Error> {
+    fn read_command(input_command_buffer: &mut Vec<u8>, stream: &mut TcpStream, connection_id: &u64) -> Result<(), io::Error> {
         loop {
             let mut char_buffer = [0u8; 1];
             match stream.read_exact(&mut char_buffer) {
                 Ok(_) => {
+                    trace!("Read command char. MessageId: {}, Char: {}", *connection_id, char_buffer[0]);
                     if char_buffer[0] == PJLINK_TERMINATOR {
                         return Result::Ok(());
                     } else {
@@ -722,17 +985,24 @@ impl PjLinkConnectionHandler {
 
     fn handle_password_input(
         stream: &mut TcpStream,
-        password: &Option<String>
+        password: &Option<String>,
+        connection_id: &u64,
     ) -> (bool, Option<String>) {
         let mut auth_buffer = Vec::<u8>::new();
         let mut password_salt = Option::None;
         let mut use_auth = false;
 
         if password.is_none() {
+            debug!("PJLink Security: nullified; MessageId: {}", connection_id);
             Self::generate_nullified_security(&mut auth_buffer);
         } else {
             let string_salt = format!("{:08X}", Self::generate_random_number());
             Self::generate_password_security(&mut auth_buffer, &string_salt);
+            debug!(
+                "PJLink Security: password; MessageId: {}, Response: {}",
+                *connection_id,
+                String::from_utf8(auth_buffer.clone()).unwrap_or(String::new())
+            );
             password_salt = Option::Some(string_salt);
             use_auth = true;
         }
@@ -748,7 +1018,8 @@ impl PjLinkConnectionHandler {
         input_command_buffer: &mut Vec<u8>,
         password: &Option<String>,
         password_salt: &Option<String>,
-        stream: &mut TcpStream
+        stream: &mut TcpStream,
+        connection_id: &u64
     ) -> Result<bool, io::Error> {
         let mut auth_error = false;
         let mut has_authenticated_response = has_authenticated;
@@ -757,18 +1028,29 @@ impl PjLinkConnectionHandler {
             if input_command_buffer.len() > 32 {
                 let mut input_password_hash: [u8; 32] = [0u8; 32];
                 input_password_hash.copy_from_slice(&input_command_buffer[0..32]);
+
                 let mut internal_password_string = password_salt.clone()
                     .unwrap();
                 internal_password_string.push_str(&(password.clone().unwrap()));
+
                 let internal_password = internal_password_string.as_bytes();
                 let internal_password_hash = md5::compute(internal_password);
 
+                debug!(
+                    "Received password hash! MessageId: {}, Hash: {}",
+                    *connection_id,
+                    String::from_utf8(input_password_hash.to_vec()).unwrap_or(String::new())
+                );
+
                 if format!("{:x}", internal_password_hash).as_bytes() == input_password_hash {
+                    debug!("Password accepted! MessageId: {}", *connection_id);
                     has_authenticated_response = true;
                 } else {
+                    debug!("Password denied! MessageId: {}", *connection_id);
                     auth_error = true;
                 }
             } else {
+                debug!("Password denied (command is too short)! MessageId: {}", *connection_id);
                 auth_error = true;
             }
 
@@ -780,7 +1062,7 @@ impl PjLinkConnectionHandler {
             }
         }
         
-        if has_authenticated {
+        if has_authenticated_response {
             input_command_buffer.drain(0..32);
         }
 
@@ -799,5 +1081,62 @@ impl PjLinkConnectionHandler {
     fn generate_password_security(buffer: &mut Vec<u8>, number: &String) {
         buffer.extend(PJLINK_SECURITY);
         buffer.extend(number.as_bytes());
+        buffer.push(PJLINK_TERMINATOR);
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct PjLinkMockHandler {
+        handle_command_fn: fn(PjLinkCommand, &PjLinkRawPayload) -> PjLinkResponse,
+        get_password_fn: fn() -> Option<String>
+    }
+
+    impl PjLinkHandler for PjLinkMockHandler {
+        fn handle_command(&mut self, command: PjLinkCommand, raw_command: &PjLinkRawPayload) -> PjLinkResponse {
+            return (self.handle_command_fn)(command, raw_command);
+        }
+
+        fn get_password(&mut self) -> Option<String> {
+            return (self.get_password_fn)();
+        }
+    }
+
+    fn simple_mock_handler() -> PjLinkHandlerShared {
+        return Arc::new(Mutex::new(PjLinkMockHandler {
+            handle_command_fn: |command, raw_command| PjLinkResponse::OutOfParameter,
+            get_password_fn: || Option::None
+        }));
+    }
+
+    #[test]
+    fn it_converts_1powr_query_to_powr_query_enum() {
+        let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![PJLINK_QUERY]);
+        let command = PjLinkConnectionHandler::get_command(&raw_command);
+        assert!(if let PjLinkCommand::Power1(PjLinkPowerCommandParameter::Query) = command {true} else {false});
+    }
+
+    #[test]
+    fn it_converts_1powr_on_to_powr_on_enum() {
+        let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'1']);
+        let command = PjLinkConnectionHandler::get_command(&raw_command);
+        assert!(if let PjLinkCommand::Power1(PjLinkPowerCommandParameter::On) = command {true} else {false});
+    }
+
+    #[test]
+    fn it_converts_1powr_off_to_powr_off_enum() {
+        let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'0']);
+        let command = PjLinkConnectionHandler::get_command(&raw_command);
+        assert!(if let PjLinkCommand::Power1(PjLinkPowerCommandParameter::Off) = command {true} else {false});
+    }
+
+    #[test]
+    fn it_converts_1powr_garbage_to_powr_unknown_enum() {
+        let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'b', b'2']);
+        let command = PjLinkConnectionHandler::get_command(&raw_command);
+        assert!(if let PjLinkCommand::Power1(PjLinkPowerCommandParameter::Unknown) = command {true} else {false});
     }
 }

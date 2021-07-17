@@ -2,7 +2,7 @@ use pjlink_bridge::*;
 
 use std::sync::{Arc, Mutex};
 use clap::{AppSettings, Clap};
-use log::{LevelFilter};
+use log::{info, LevelFilter};
 use simple_logger::{SimpleLogger};
 
 #[derive(Clap)]
@@ -49,9 +49,18 @@ pub fn main() {
             .with_level(match opts.verbose {
                 1 => LevelFilter::Error,
                 2 => LevelFilter::Warn,
-                3 => LevelFilter::Debug,
-                4 => LevelFilter::Trace,
+                3 => LevelFilter::Info,
+                4 => LevelFilter::Debug,
+                5 => LevelFilter::Trace,
                 _ => LevelFilter::Warn
+            })
+            .with_module_level("pjlink_bridge", match opts.verbose {
+                1 => LevelFilter::Error,
+                2 => LevelFilter::Warn,
+                3 => LevelFilter::Info,
+                4 => LevelFilter::Debug,
+                5 => LevelFilter::Trace,
+                _ => LevelFilter::Info
             })
             .init()
             .unwrap();
@@ -150,27 +159,27 @@ impl PjLinkHandler for PjLinkMockProjector{
         return match command {
             // #region Power Control Instruction / POWR
             PjLinkCommand::Power1(PjLinkPowerCommandParameter::Query) => {
-                println!("Query Power Status");
-                return PjLinkResponse::OkSingle(self.state.power_on)
+                info!("Query Power Status");
+                return PjLinkResponse::Single(self.state.power_on)
             }
             PjLinkCommand::Power1(PjLinkPowerCommandParameter::On) => {
-                println!("Power On Projector");
+                info!("Power On Projector");
                 self.state.power_on = PjLinkPowerCommandStatus::On;
                 return PjLinkResponse::Ok;
             }
             PjLinkCommand::Power1(PjLinkPowerCommandParameter::Off) => {
-                println!("Power Off Projector");
+                info!("Power Off Projector");
                 self.state.power_on = PjLinkPowerCommandStatus::Off;
                 return PjLinkResponse::Ok;
             }
             // #endregion
             // #region Input Switch Instruction / INPT
             PjLinkCommand::Input1(PjLinkInputCommandParameter::Query) | PjLinkCommand::Input2(PjLinkInputCommandParameter::Query) => {
-                println!("Input1|2 Query");
-                return PjLinkResponse::OkMultiple(Vec::from(self.state.input_status));
+                info!("Input1|2 Query");
+                return PjLinkResponse::Multiple(Vec::from(self.state.input_status));
             },
             PjLinkCommand::Input1(input) | PjLinkCommand::Input2(input) => {
-                println!("Input1|2 Set");
+                info!("Input1|2 Set");
 
                 match input {
                     PjLinkInputCommandParameter::RGB(value) => {
@@ -199,11 +208,11 @@ impl PjLinkHandler for PjLinkMockProjector{
             // #endregion
             // #region Mute Instruction / AVMT
             PjLinkCommand::AvMute1(PjLinkMuteCommandParameter::Query) => {
-                println!("AV Mute Query");
-                return PjLinkResponse::OkMultiple(Vec::from(self.state.mute_status))
+                info!("AV Mute Query");
+                return PjLinkResponse::Multiple(Vec::from(self.state.mute_status))
             }
             PjLinkCommand::AvMute1(parameter) => {
-                println!("AV Mute Set");
+                info!("AV Mute Set");
                 let is_muted = self.state.mute_status[1] == PjLinkMuteCommandStatus::Mute;
                 let current_muted_item = self.state.mute_status[0];
 
@@ -246,8 +255,8 @@ impl PjLinkHandler for PjLinkMockProjector{
             // #endregion  
             // #region Error Status Query / ERST
             PjLinkCommand::ErrorStatus1 => {
-                println!("Error Status Query");
-                return PjLinkResponse::OkMultiple(vec![
+                info!("Error Status Query");
+                return PjLinkResponse::Multiple(vec![
                     self.state.error_fan_status,
                     self.state.error_lamp_status,
                     self.state.error_temperature_status,
@@ -259,124 +268,132 @@ impl PjLinkHandler for PjLinkMockProjector{
             // #endregion
             // #region Lamp Number/Lighting Hour Query / LAMP
             PjLinkCommand::Lamp1 => {
-                println!("Lamp Query");
+                info!("Lamp Query");
                 let mut hours = self.state.lamp_hours.clone();
                 hours.push(b' ');
                 hours.push(self.state.power_on);
-                return PjLinkResponse::OkMultiple(hours);
+                return PjLinkResponse::Multiple(hours);
             }
             // #endregion
             // #region Input Toggling List Query / INST
             PjLinkCommand::InputTogglingList1 | PjLinkCommand::InputTogglingList2 => {
-                println!("Input Toggling List Query");
-                return PjLinkResponse::OkMultiple(self.state.available_inputs.clone())
+                info!("Input Toggling List Query");
+                return PjLinkResponse::Multiple(self.state.available_inputs.clone())
             }
             // #endregion
             // #region Projector/Display Name Query / NAME
             PjLinkCommand::Name1 => {
-                println!("Name Query");
-                return PjLinkResponse::OkMultiple(self.options.projector_name.clone());
+                info!("Name Query");
+                return PjLinkResponse::Multiple(self.options.projector_name.clone());
             }
             // #endregion
             // #region Manufacture Name Information Query / INF1
             PjLinkCommand::InfoManufacturer1 => {
-                println!("Info Manufacturer Query");
-                return PjLinkResponse::OkMultiple(self.options.manufacturer_name.clone());
+                info!("Info Manufacturer Query");
+                return PjLinkResponse::Multiple(self.options.manufacturer_name.clone());
             }
             // #endregion
             // #region Product Name Information Query / INF2
             PjLinkCommand::InfoProductName1 => {
-                println!("Info Product Name Query");
-                return PjLinkResponse::OkMultiple(self.options.product_name.clone());
+                info!("Info Product Name Query");
+                return PjLinkResponse::Multiple(self.options.product_name.clone());
             }
             // #endregion
             // #region Other Information Query / INFO
             PjLinkCommand::InfoOther1 => {
-                println!("Info Other Query");
-                return PjLinkResponse::OkMultiple(vec![]);
+                info!("Info Other Query");
+                return PjLinkResponse::Multiple(vec![]);
             }
             // #endregion
             // #region Class Information Query / CLSS
             PjLinkCommand::Class1 => {
-                println!("Class Information Query");
-                return PjLinkResponse::OkSingle(self.options.class_type)
+                info!("Class Information Query");
+                return PjLinkResponse::Single(self.options.class_type)
             }
             // #endregion
             // #region Serial Number Query / SNUM
             PjLinkCommand::SerialNumber2 => {
-                println!("Serial Number Query");
-                return PjLinkResponse::OkMultiple(self.options.serial_number.clone());
+                info!("Serial Number Query");
+                return PjLinkResponse::Multiple(self.options.serial_number.clone());
             }
             // #endregion
             // #region Software Version Query / SVER
             PjLinkCommand::SoftwareVersion2 => {
-                println!("Software Version Query");
-                return PjLinkResponse::OkMultiple(self.options.software_version.clone());
+                info!("Software Version Query");
+                return PjLinkResponse::Multiple(self.options.software_version.clone());
             }
             // #endregion
             // #region Input Terminal Name Query / INNM
             PjLinkCommand::InputTerminalName2(input_type) => {
-                println!("Input Terminal Name Query");
+                info!("Input Terminal Name Query");
                 match input_type {
-                    PjLinkInputCommandParameter::RGB(input) => PjLinkResponse::OkMultiple(Vec::from(format!("VGA{}", input))),
-                    PjLinkInputCommandParameter::Video(input) => PjLinkResponse::OkMultiple(Vec::from(format!("Analog{}", input))),
-                    PjLinkInputCommandParameter::Digital(input) => PjLinkResponse::OkMultiple(Vec::from(format!("HDMI{}", input))),
-                    PjLinkInputCommandParameter::Network(input) => PjLinkResponse::OkMultiple(Vec::from(format!("Network{}", input))),
-                    PjLinkInputCommandParameter::Storage(input) => PjLinkResponse::OkMultiple(Vec::from(format!("Storage{}", input))),
-                    PjLinkInputCommandParameter::Internal(input) => PjLinkResponse::OkMultiple(Vec::from(format!("Internal{}", input))),
+                    PjLinkInputCommandParameter::RGB(input) => PjLinkResponse::Multiple(Vec::from(format!("VGA{}", input as char))),
+                    PjLinkInputCommandParameter::Video(input) => PjLinkResponse::Multiple(Vec::from(format!("Analog{}", input as char))),
+                    PjLinkInputCommandParameter::Digital(input) => PjLinkResponse::Multiple(Vec::from(format!("HDMI{}", input as char))),
+                    PjLinkInputCommandParameter::Network(input) => PjLinkResponse::Multiple(Vec::from(format!("Network{}", input as char))),
+                    PjLinkInputCommandParameter::Storage(input) => PjLinkResponse::Multiple(Vec::from(format!("Storage{}", input as char))),
+                    PjLinkInputCommandParameter::Internal(input) => PjLinkResponse::Multiple(Vec::from(format!("Internal{}", input as char))),
                     _ => PjLinkResponse::OutOfParameter
                 }
             }
             // #endregion
             // #region Input Resolution Query / IRES
             PjLinkCommand::InputResolution2 => {
-                println!("Input Resolution Query");
-                return PjLinkResponse::OkMultiple(self.options.screen_resolution.clone());
+                info!("Input Resolution Query");
+                return PjLinkResponse::Multiple(self.options.screen_resolution.clone());
             }
             // #endregion
             // #region Recommend Resolution Query / RRES
             PjLinkCommand::RecommendResolution2 => {
-                println!("Recommend Resolution Query");
-                return PjLinkResponse::OkMultiple(self.options.recommended_screen_resolution.clone());
+                info!("Recommend Resolution Query");
+                return PjLinkResponse::Multiple(self.options.recommended_screen_resolution.clone());
             }
             // #endregion
             // #region Filter Usage Time Query / FILT
             PjLinkCommand::FilterUsageTime2 => {
-                println!("Filter Usage Time Query");
-                return PjLinkResponse::OkMultiple(self.state.filter_hours.clone());
+                info!("Filter Usage Time Query");
+                return PjLinkResponse::Multiple(self.state.filter_hours.clone());
             }
             // #endregion
             // #region Lamp Replacement Model Number Query / RLMP
             PjLinkCommand::LampReplacementModelNumber2 => {
-                println!("Lamp Replacement Model Number Query");
-                return PjLinkResponse::OkEmpty
+                info!("Lamp Replacement Model Number Query");
+                return PjLinkResponse::Empty
             }
             // #endregion
             // #region Filter Replacement Model Number Query / RFIL
             PjLinkCommand::FilterReplacementModelNumber2 => {
-                println!("Filter Replacement Model Number Query");
-                return PjLinkResponse::OkEmpty;
+                info!("Filter Replacement Model Number Query");
+                return PjLinkResponse::Empty;
             }
             // #endregion
             // #region Speaker Volume Adjustment Instruction / SVOL
-            PjLinkCommand::SpeakerVolumeAdjustment2(_) => {
-                println!("Speaker Volume Adjustment Set");
-                PjLinkResponse::Ok
+            PjLinkCommand::SpeakerVolumeAdjustment2(param) => {
+                info!("Speaker Volume Adjustment Set");
+                if let PjLinkVolumeCommandParameter::Unknown = param {
+                    PjLinkResponse::OutOfParameter
+                } else {
+                    PjLinkResponse::Ok
+                }
             },
             // #endregion
             // #region Microphone Volume Adjustment Instruction / MVOL
-            PjLinkCommand::MicrophoneVolumeAdjustment2(_) => {
-                println!("Microphone Volume Adjustment Set");
-                return PjLinkResponse::Undefined;
+            PjLinkCommand::MicrophoneVolumeAdjustment2(param) => {
+                info!("Microphone Volume Adjustment Set");
+                if let PjLinkVolumeCommandParameter::Unknown = param {
+                    PjLinkResponse::OutOfParameter
+                } else {
+                    PjLinkResponse::Ok
+                }
             }
             // #endregion
             // #region Freeze Instruction / FREZ
             PjLinkCommand::Freeze2(PjLinkFreezeCommandParameter::Query) => {
-                println!("Freeze Instruction Query");
-                return PjLinkResponse::OkSingle(self.state.freeze_status)
+                info!("Freeze Instruction Query");
+                return PjLinkResponse::Single(self.state.freeze_status)
             }
             PjLinkCommand::Freeze2(instruction) => {
-                println!("Freeze Instruction Set");
+                info!("Freeze Instruction Set");
                 self.state.freeze_status = match instruction {
                     PjLinkFreezeCommandParameter::Freeze => b'1',
                     PjLinkFreezeCommandParameter::Unfreeze => b'0',
