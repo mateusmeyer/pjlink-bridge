@@ -149,40 +149,38 @@ const PJLINK_MAX_BROADCAST_BUFFER_SIZE: usize = 25;
 /// without the [terminator](self::PJLINK_TERMINATOR).
 /// 
 /// ## Examples
-/// ### Using [```new_command()```](PjLinkPayload::new_command)
+/// ### Using [```new_command()```](PjLinkRawPayload::new_command)
 /// ```
 /// use pjlink_bridge::*;
 /// 
-/// fn main() {
-///     let payload = PjLinkPayload::new_command(b'1', *b"POWR", vec![PJLINK_QUERY]);
-/// }
+/// let payload = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![PJLINK_QUERY]);
 /// ```
-/// ### Using [```new_response()```](PjLinkPayload::new_response)
+/// ### Using [```new_response()```](PjLinkRawPayload::new_response)
 /// ```
 /// use pjlink_bridge::*;
 /// 
-/// fn main() {
-///     let payload = PjLinkPayload::new_response(b'1', *b"POWR", vec![b'0']);
-/// }
+/// let payload = PjLinkRawPayload::new_response(b'1', *b"POWR", vec![b'0']);
 /// ```
-/// ### Struct instantianion 
+/// ### Struct instantiation 
 /// ```
 /// use pjlink_bridge::*;
 /// 
-/// fn main() {
-///     let payload = PjLinkPayload {
-///         header_and_class: [PJLINK_HEADER, b'1'],
-///         command_body: *b"POWR",
-///         separator: PJLINK_COMMAND_SEPARATOR,
-///         transmission_parameter: vec![PJLINK_QUERY]
-///     }
+/// let payload = PjLinkRawPayload {
+///     header_and_class: [PJLINK_HEADER, b'1'],
+///     command_body: *b"POWR",
+///     separator: PJLINK_COMMAND_SEPARATOR,
+///     transmission_parameter: vec![PJLINK_QUERY]
 /// }
 /// ```
 pub struct PjLinkRawPayload {
     /// Combines [PJLink's header](self::PJLINK_HEADER) and command class together.
-    /// 
     header_and_class: [u8; 2],
+    /// Contains PJLink's command body, without the class
+    /// See [header_and_class](self::PjLinkRawPayload.header_class)
     command_body: [u8; 4],
+    /// Message separator.
+    /// [PJLINK_COMMAND_SEPARATOR](self::PJLINK_COMMAND_SEPARATOR) for a command,
+    /// [PJLINK_RESPONSE_SEPARATOR](self::PJLINK_RESPONSE_SEPARATOR) for a response,
     separator: u8,
     transmission_parameter: Vec<u8>,
 }
@@ -191,7 +189,7 @@ impl PjLinkRawPayload {
     /// Utility method for generating a PJLink Command line (uses 
     /// [PJLINK_COMMAND_SEPARATOR](self::PJLINK_COMMAND_SEPARATOR) as separator)
     /// 
-    /// Arguments:
+    /// **Arguments**:
     /// * `class`: PJLink command class. Either `b'1'` or `b'2'`.
     /// * `command_body`: PJLink command body. Value example: `*b"POWR"`
     /// * `transmission_parameter`: PJLink transmission parameter.`
@@ -200,19 +198,19 @@ impl PjLinkRawPayload {
         command_body: [u8; 4],
         transmission_parameter: Vec<u8>
     ) -> PjLinkRawPayload {
-        return PjLinkRawPayload {
+        PjLinkRawPayload {
             header_and_class: [PJLINK_HEADER, class],
             command_body,
             separator: PJLINK_COMMAND_SEPARATOR,
             transmission_parameter
-        };
+        }
     }
 
     /// Utility method for generating a PJLink Response line (uses 
     /// [PJLINK_RESPONSE_SEPARATOR](self::PJLINK_RESPONSE_SEPARATOR) as
     /// separator)
     /// 
-    /// Arguments:
+    /// **Arguments**:
     /// * `class`: PJLink command class. Either `b'1'` or `b'2'`.
     /// * `command_body`: PJLink command body. Value example: `*b"POWR"`
     /// * `transmission_parameter`: PJLink transmission parameter.`
@@ -221,13 +219,86 @@ impl PjLinkRawPayload {
         command_body: [u8; 4],
         transmission_parameter: Vec<u8>
     ) -> PjLinkRawPayload {
-        return PjLinkRawPayload {
+        PjLinkRawPayload {
             header_and_class: [PJLINK_HEADER, class],
             command_body,
             separator: PJLINK_RESPONSE_SEPARATOR,
             transmission_parameter
-        };
+        }
     }
+
+    /// Utility method for generating a PJLink Command/Response line from
+    /// a buffer.
+    ///
+    /// **Arguments**:
+    /// * `buffer`: Raw PJLink instruction buffer
+    /// * `connection_id`: Connection ID
+    pub fn from_buffer(buffer: &mut Vec<u8>, connection_id: &u64) -> PjLinkRawPayload {
+        let mut header_and_class: [u8; 2] = Default::default();
+        let mut command_body: [u8; 4] = Default::default();
+        let transmission_parameter: Vec<u8> = buffer[7..buffer.len()].to_vec();
+
+        header_and_class.copy_from_slice(&buffer[0..2]);
+        command_body.copy_from_slice(&buffer[2..6]);
+
+        let command = PjLinkRawPayload {
+            header_and_class,
+            command_body,
+            separator: buffer[6],
+            transmission_parameter,
+        };
+
+        debug!(
+            "Parsed command. MessageId: {}; HeaderClass: {}; CmdBody: {}; Sep: {}, TxParam: {}",
+            *connection_id,
+            String::from_utf8(command.header_and_class.to_vec()).unwrap_or_default(),
+            String::from_utf8(command.command_body.to_vec()).unwrap_or_default(),
+            command.separator as char,
+            String::from_utf8(command.transmission_parameter.to_vec()).unwrap_or_default()
+        );
+
+        command
+    }
+
+    /// Updates a [PjLinkRawPayload](self::PjLinkRawPayload) instance with the provided
+    /// [PjLinkResponse](self::PjLinkResponse).
+    ///
+    /// **Arguments**:
+    /// * `response`: [PjLinkResponse](self::PjLinkResponse) enum item
+    /// * `connection_id`: Connection ID
+    pub fn update_with_response(self, response: PjLinkResponse, connection_id: &u64) -> PjLinkRawPayload {
+        let header_and_class: [u8; 2] = self.header_and_class;
+        let command_body: [u8; 4] = self.command_body;
+        let separator: u8 = PJLINK_RESPONSE_SEPARATOR;
+        let transmission_parameter: Vec<u8> = match response {
+            PjLinkResponse::Ok => Vec::from("OK"),
+            PjLinkResponse::OutOfParameter => Vec::from("ERR2"),
+            PjLinkResponse::UnavailableTime => Vec::from("ERR3"),
+            PjLinkResponse::ProjectorOrDisplayFailure => Vec::from("ERR4"),
+            PjLinkResponse::Undefined => Vec::from("ERR1"),
+            PjLinkResponse::Single(response_value) => Vec::from([response_value]),
+            PjLinkResponse::Multiple(response_value) => response_value,
+            PjLinkResponse::Empty => Vec::new(),
+        };
+        
+        debug!(
+            "Parsed Response: MessageId: {}, HeaderClass: {}, CmdBody: {}, Sep: {}, TxParam: {}",
+            *connection_id,
+            String::from_utf8(header_and_class.to_vec()).unwrap_or_default(),
+            String::from_utf8(command_body.to_vec()).unwrap_or_default(),
+            separator as char,
+            String::from_utf8(transmission_parameter.clone()).unwrap_or_default()
+        );
+
+        PjLinkRawPayload {
+            header_and_class,
+            command_body,
+            separator,
+            transmission_parameter,
+        }
+    }
+
+
 }
 
 /// PJLink Response Transmission parameter
@@ -277,35 +348,68 @@ pub enum PjLinkResponse {
     Empty
 }
 
+/// Parameters for [1POWR](self::PjLinkCommand::Power1) command
 pub enum PjLinkPowerCommandParameter {
+    /// Power off action: `%1POWR 0`
     Off,
+    /// Power on action: `%1POWR 1`
     On,
+    /// Query action:`%1POWR ?`
+    ///
+    /// See: [PJLINK_QUERY](self::PJLINK_QUERY)
     Query,
+    /// Used if an unknown parameter is received
     Unknown,
 }
+
+/// Response status for [1POWR](self::PjLinkCommand::Power1) command
 
 pub struct PjLinkPowerCommandStatus;
 #[allow(non_upper_case_globals)]
 impl PjLinkPowerCommandStatus {
+    /// Projector is off: `%1POWR=0`
     pub const Off: u8 = b'0';
+    /// Projector is on: `%1POWR=1`
     pub const On: u8 = b'1';
+    /// Projector is in cooling state: `%1POWR=2`
     pub const Cooling: u8 = b'2';
+    /// Projector is in warmup state: `%1POWR=3`
     pub const WarmUp: u8 = b'3';
 }
 
+/// Response status for [1CLSS](self::PjLinkCommand::Class1) command
 pub struct PjLinkClassCommandStatus;
 #[allow(non_upper_case_globals)]
 impl PjLinkClassCommandStatus {
+    /// Projector supports Class 1 commands: `%1CLSS=1`
     pub const Class1: u8 = b'1';
+    /// Projector supports Class 1 and 2 commands: `%1CLSS=2`
     pub const Class2: u8 = b'2';
 }
 
+/// Response status for each item of [1ERST](self::PjLinkCommand::ErrorStatus1) command.
+///
+/// See: [PjLinkCommand::ErrorStatus1](self::PjLinkCommand::ErrorStatus1)
 pub struct PjLinkErrorStatusCommandStatusItem;
 #[allow(non_upper_case_globals)]
 impl PjLinkErrorStatusCommandStatusItem {
+    /// Item is normal state / is not checked
     pub const Normal: u8 = b'0';
+    /// Item is in warning state
     pub const Warning: u8 = b'1';
+    /// Item is in error state
     pub const Error: u8 = b'2';
+}
+
+pub enum PjLinkInputCommandParameter {
+    RGB(u8),
+    Video(u8),
+    Digital(u8),
+    Storage(u8),
+    Network(u8),
+    Internal(u8),
+    Query,
+    Unknown,
 }
 
 pub struct PjLinkInputCommandStatus;
@@ -317,16 +421,6 @@ impl PjLinkInputCommandStatus {
     pub const Storage: u8 = b'4';
     pub const Network: u8 = b'5';
     pub const Internal: u8 = b'6';
-}
-pub enum PjLinkInputCommandParameter {
-    RGB(u8),
-    Video(u8),
-    Digital(u8),
-    Storage(u8),
-    Network(u8),
-    Internal(u8),
-    Query,
-    Unknown,
 }
 
 pub struct PjLinkMuteCommandStatus;
@@ -400,6 +494,185 @@ pub enum PjLinkCommand {
     Unknown,
 }
 
+impl PjLinkCommand {
+    pub fn from_raw_payload(raw_command: &PjLinkRawPayload) -> PjLinkCommand {
+        let transmission_parameter = &raw_command.transmission_parameter;
+        let class = raw_command.header_and_class[1];
+        let mut command_body_string = std::str::from_utf8(&[class]).unwrap().to_owned();
+        command_body_string.push_str(
+            std::str::from_utf8(&raw_command.command_body).unwrap()
+        );
+        let command_body_str = command_body_string.as_str();
+        let is_class_2 = class == b'2';
+        let transmission_parameter_len = transmission_parameter.len();
+
+        match command_body_str {
+            "1POWR" => {
+                let raw_parameter = transmission_parameter[0];
+                let parameter = match raw_parameter as char {
+                    '1' => PjLinkPowerCommandParameter::On,
+                    '0' => PjLinkPowerCommandParameter::Off,
+                    PJLINK_QUERY_CHAR => PjLinkPowerCommandParameter::Query,
+                    _ => PjLinkPowerCommandParameter::Unknown, 
+                };
+
+                PjLinkCommand::Power1(parameter)
+            },
+            "1INPT" | "2INPT" => {
+                let parameter: PjLinkInputCommandParameter;
+                if transmission_parameter_len == 1 && transmission_parameter[0] == PJLINK_QUERY {
+                    parameter = PjLinkInputCommandParameter::Query
+                } else if transmission_parameter_len == 2 {
+                    let (input_char, input_value) = (transmission_parameter[0], transmission_parameter[1]);
+                    parameter = Self::input_param_parse(is_class_2, input_char, input_value);
+                } else {
+                    parameter = PjLinkInputCommandParameter::Unknown
+                };
+
+                if is_class_2 {
+                    PjLinkCommand::Input2(parameter)
+                } else {
+                    PjLinkCommand::Input1(parameter)
+                }
+            }
+            "1AVMT" => {
+                let parameter = if transmission_parameter_len == 1 && transmission_parameter[0] == PJLINK_QUERY {
+                    PjLinkMuteCommandParameter::Query
+                } else if transmission_parameter_len == 2 {
+                    let raw_parameter = (transmission_parameter[0], transmission_parameter[1]);
+                    match raw_parameter {
+                        (b'1', b'1') => PjLinkMuteCommandParameter::Video(true),
+                        (b'1', b'0') => PjLinkMuteCommandParameter::Video(false),
+                        (b'2', b'1') => PjLinkMuteCommandParameter::Audio(true),
+                        (b'2', b'0') => PjLinkMuteCommandParameter::Audio(false),
+                        (b'3', b'1') => PjLinkMuteCommandParameter::AudioAndVideo(true),
+                        (b'3', b'0') => PjLinkMuteCommandParameter::AudioAndVideo(false),
+                        _ => PjLinkMuteCommandParameter::Unknown
+                    }
+                } else {
+                    PjLinkMuteCommandParameter::Unknown
+                };
+
+                PjLinkCommand::AvMute1(parameter)
+            }
+            "1ERST" => PjLinkCommand::ErrorStatus1,
+            "1LAMP" => PjLinkCommand::Lamp1,
+            "1INST" | "2INST" => if is_class_2 {
+                PjLinkCommand::InputTogglingList2
+            } else {
+                PjLinkCommand::InputTogglingList1
+            }
+            "1NAME" => PjLinkCommand::Name1,
+            "1INF1" => PjLinkCommand::InfoManufacturer1,
+            "1INF2" => PjLinkCommand::InfoProductName1,
+            "1INFO" => PjLinkCommand::InfoOther1,
+            "1CLSS" => PjLinkCommand::Class1,
+            "2SNUM" => PjLinkCommand::SerialNumber2,
+            "2SVER" => PjLinkCommand::SoftwareVersion2,
+            "2INNM" => {
+                let parameter: PjLinkInputCommandParameter;
+                if transmission_parameter_len == 3 {
+                    if transmission_parameter[0] == PJLINK_QUERY {
+                        let (input_char, input_value) = (transmission_parameter[1], transmission_parameter[2]);
+                        parameter = Self::input_param_parse(true, input_char, input_value);
+                    } else {
+                        parameter = PjLinkInputCommandParameter::Unknown
+                    }
+                } else {
+                    parameter = PjLinkInputCommandParameter::Unknown
+                };
+
+                PjLinkCommand::InputTerminalName2(parameter)
+            },
+            "2IRES" => PjLinkCommand::InputResolution2,
+            "2RRES" => PjLinkCommand::RecommendResolution2,
+            "2FILT" => PjLinkCommand::FilterUsageTime2,
+            "2RLMP" => PjLinkCommand::LampReplacementModelNumber2,
+            "2RFIL" => PjLinkCommand::FilterReplacementModelNumber2,
+            "2SVOL" => {
+                if transmission_parameter_len == 1 {
+                    let is_increase = transmission_parameter[0] == b'1';
+                    let is_decrease = transmission_parameter[0] == b'0';
+                    return PjLinkCommand::SpeakerVolumeAdjustment2(if is_increase {
+                        PjLinkVolumeCommandParameter::Increase
+                    } else if is_decrease {
+                        PjLinkVolumeCommandParameter::Decrase
+                    } else {
+                        PjLinkVolumeCommandParameter::Unknown
+                    })
+                }
+
+                PjLinkCommand::Unknown
+            },
+            "2MVOL" => {
+                if transmission_parameter_len == 1 {
+                    let is_increase = transmission_parameter[0] == b'1';
+                    let is_decrease = transmission_parameter[0] == b'0';
+                    return PjLinkCommand::MicrophoneVolumeAdjustment2(if is_increase {
+                        PjLinkVolumeCommandParameter::Increase
+                    } else if is_decrease {
+                        PjLinkVolumeCommandParameter::Decrase
+                    } else {
+                        PjLinkVolumeCommandParameter::Unknown
+                    })
+                }
+
+                PjLinkCommand::Unknown
+            },
+            "2FREZ" => {
+                if transmission_parameter_len == 1 {
+                    if transmission_parameter[0] == PJLINK_QUERY {
+                        return PjLinkCommand::Freeze2(PjLinkFreezeCommandParameter::Query);
+                    } else {
+                        let is_freeze = transmission_parameter[0] == b'1';
+                        let is_unfreeze = transmission_parameter[0] == b'0';
+                        return PjLinkCommand::Freeze2(if is_freeze {
+                            PjLinkFreezeCommandParameter::Freeze
+                        } else if is_unfreeze {
+                            PjLinkFreezeCommandParameter::Unfreeze
+                        } else {
+                            PjLinkFreezeCommandParameter::Unknown
+                        })
+                    }
+                }
+
+                PjLinkCommand::Unknown
+            },
+            _ => PjLinkCommand::Unknown
+        }
+    }
+
+    fn input_param_parse(
+        is_class_2: bool,
+        input_char: u8,
+        input_value: u8,
+    ) -> PjLinkInputCommandParameter {
+        let is_invalid_below = input_value < b'1';
+        let is_class_1_invalid_higher = !is_class_2 && (input_value > b'9');
+        let is_class_2_invalid_higher = is_class_2
+                                        && ((input_value > b'9' && input_value < b'A')
+                                            || input_value > b'Z');
+
+        if  is_invalid_below || is_class_1_invalid_higher || is_class_2_invalid_higher {
+            PjLinkInputCommandParameter::Unknown                        
+        } else {
+            match input_char {
+                b'1' => PjLinkInputCommandParameter::RGB(input_value),
+                b'2' => PjLinkInputCommandParameter::Video(input_value),
+                b'3' => PjLinkInputCommandParameter::Digital(input_value),
+                b'4' => PjLinkInputCommandParameter::Storage(input_value),
+                b'5' => PjLinkInputCommandParameter::Network(input_value),
+                b'6' => if is_class_2 {
+                    PjLinkInputCommandParameter::Internal(input_value)
+                } else {
+                    PjLinkInputCommandParameter::Unknown
+                }
+                _ => PjLinkInputCommandParameter::Unknown
+            }
+        } 
+    }
+}
+
 pub enum PjLinkStatusCommand {
     Acknowledge2([[u8; 2]; 6]),
     Lookup2([[u8; 2]; 6]),
@@ -428,7 +701,7 @@ impl PjLinkServer{
 
         let udp_socket = UdpSocket::bind(format!("{}:{}", udp_bind_address, port)).unwrap();
         let listener = PjLinkListener::new(handler, tcp_listener, udp_socket);
-        let udp_address_clone = udp_bind_address.clone();
+        let udp_address_clone = udp_bind_address;
         let listener_clone = listener.clone();
         
         let handle = thread::spawn(move || {
@@ -476,20 +749,20 @@ impl<'a> PjLinkListener<'a> {
         tcp_listener: TcpListener,
         udp_socket: UdpSocket
     ) -> PjLinkListenerShared<'a> {
-        return Arc::new(PjLinkListener {
+        Arc::new(PjLinkListener {
             _nil: &false,
             shared_handler,
             shared_connection_counter: Arc::new(AtomicU64::new(0)),
             tcp_listener,
             udp_socket: Option::Some(udp_socket),
-        });
+        })
     }
 
     pub fn new_without_broadcast(
         shared_handler: Arc<Mutex<dyn PjLinkHandler>>,
         tcp_listener: TcpListener
     ) -> Self {
-        return PjLinkListener {
+        PjLinkListener {
             _nil: &false,
             shared_handler,
             shared_connection_counter: Arc::new(AtomicU64::new(0)),
@@ -568,7 +841,7 @@ impl PjLinkConnectionHandler {
                 break 'message;
             }
 
-            if (!has_authenticated && use_auth) || (use_auth && input_command_buffer[0] != PJLINK_HEADER) {
+            if use_auth && (!has_authenticated || (input_command_buffer[0] != PJLINK_HEADER)) {
                 match Self::handle_password_hash_response(
                     has_authenticated,
                     &mut input_command_buffer,
@@ -591,12 +864,12 @@ impl PjLinkConnectionHandler {
                 }
             }
 
-            let raw_command = Self::to_raw_command(&mut input_command_buffer, &connection_id);
-            let command = Self::get_command(&raw_command);
+            let raw_command = PjLinkRawPayload::from_buffer(&mut input_command_buffer, &connection_id);
+            let command = PjLinkCommand::from_raw_payload(&raw_command);
 
             if let Ok(mut handler) = lock_handler.lock() {
                 let response = handler.handle_command(command, &raw_command);
-                let raw_response = Self::to_raw_response(raw_command, response, &connection_id);
+                let raw_response = raw_command.update_with_response(response, &connection_id);
                 let output_buffer = Self::write_to_buffer(raw_response);
                 match stream.write(&output_buffer) {
                     Ok(_) => {
@@ -643,7 +916,7 @@ impl PjLinkConnectionHandler {
                     if is_valid_command {
                         debug!(
                             "UDP message received! ParsedMessage: {:?}",
-                            String::from_utf8(input_command.clone()).unwrap_or(String::new())
+                            String::from_utf8(input_command.clone()).unwrap_or_default()
                         );
                     } else {
                         debug!("UDP message doesn't end with Carriage Return. Origin: {}", origin);
@@ -679,241 +952,6 @@ impl PjLinkConnectionHandler {
         }
     }
 
-    fn get_command(raw_command: &PjLinkRawPayload) -> PjLinkCommand {
-        let transmission_parameter = &raw_command.transmission_parameter;
-        let class = raw_command.header_and_class[1];
-        let mut command_body_string = std::str::from_utf8(&[class]).unwrap().to_owned();
-        command_body_string.push_str(
-            std::str::from_utf8(&raw_command.command_body).unwrap()
-        );
-        let command_body_str = command_body_string.as_str();
-        let is_class_2 = class == b'2';
-        let transmission_parameter_len = transmission_parameter.len();
-
-        return match command_body_str {
-            "1POWR" => {
-                let raw_parameter = transmission_parameter[0];
-                let parameter = match raw_parameter as char {
-                    '1' => PjLinkPowerCommandParameter::On,
-                    '0' => PjLinkPowerCommandParameter::Off,
-                    PJLINK_QUERY_CHAR => PjLinkPowerCommandParameter::Query,
-                    _ => PjLinkPowerCommandParameter::Unknown, 
-                };
-
-                return PjLinkCommand::Power1(parameter);
-            },
-            "1INPT" | "2INPT" => {
-                let parameter: PjLinkInputCommandParameter;
-                if transmission_parameter_len == 1 && transmission_parameter[0] == PJLINK_QUERY {
-                    parameter = PjLinkInputCommandParameter::Query
-                } else if transmission_parameter_len == 2 {
-                    let (input_char, input_value) = (transmission_parameter[0], transmission_parameter[1]);
-                    parameter = Self::input_param_parse(is_class_2, input_char, input_value);
-                } else {
-                    parameter = PjLinkInputCommandParameter::Unknown
-                };
-
-                return if is_class_2 {
-                    PjLinkCommand::Input2(parameter)
-                } else {
-                    PjLinkCommand::Input1(parameter)
-                }
-            }
-            "1AVMT" => {
-                let parameter = if transmission_parameter_len == 1 && transmission_parameter[0] == PJLINK_QUERY {
-                    PjLinkMuteCommandParameter::Query
-                } else if transmission_parameter_len == 2 {
-                    let raw_parameter = (transmission_parameter[0], transmission_parameter[1]);
-                    match raw_parameter {
-                        (b'1', b'1') => PjLinkMuteCommandParameter::Video(true),
-                        (b'1', b'0') => PjLinkMuteCommandParameter::Video(false),
-                        (b'2', b'1') => PjLinkMuteCommandParameter::Audio(true),
-                        (b'2', b'0') => PjLinkMuteCommandParameter::Audio(false),
-                        (b'3', b'1') => PjLinkMuteCommandParameter::AudioAndVideo(true),
-                        (b'3', b'0') => PjLinkMuteCommandParameter::AudioAndVideo(false),
-                        _ => PjLinkMuteCommandParameter::Unknown
-                    }
-                } else {
-                    PjLinkMuteCommandParameter::Unknown
-                };
-
-                return PjLinkCommand::AvMute1(parameter);
-            }
-            "1ERST" => PjLinkCommand::ErrorStatus1,
-            "1LAMP" => PjLinkCommand::Lamp1,
-            "1INST" | "2INST" => if is_class_2 {
-                PjLinkCommand::InputTogglingList2
-            } else {
-                PjLinkCommand::InputTogglingList1
-            }
-            "1NAME" => PjLinkCommand::Name1,
-            "1INF1" => PjLinkCommand::InfoManufacturer1,
-            "1INF2" => PjLinkCommand::InfoProductName1,
-            "1INFO" => PjLinkCommand::InfoOther1,
-            "1CLSS" => PjLinkCommand::Class1,
-            "2SNUM" => PjLinkCommand::SerialNumber2,
-            "2SVER" => PjLinkCommand::SoftwareVersion2,
-            "2INNM" => {
-                let parameter: PjLinkInputCommandParameter;
-                if transmission_parameter_len == 3 {
-                    if transmission_parameter[0] == PJLINK_QUERY {
-                        let (input_char, input_value) = (transmission_parameter[1], transmission_parameter[2]);
-                        parameter = Self::input_param_parse(true, input_char, input_value);
-                    } else {
-                        parameter = PjLinkInputCommandParameter::Unknown
-                    }
-                } else {
-                    parameter = PjLinkInputCommandParameter::Unknown
-                };
-
-                return PjLinkCommand::InputTerminalName2(parameter);
-            },
-            "2IRES" => PjLinkCommand::InputResolution2,
-            "2RRES" => PjLinkCommand::RecommendResolution2,
-            "2FILT" => PjLinkCommand::FilterUsageTime2,
-            "2RLMP" => PjLinkCommand::LampReplacementModelNumber2,
-            "2RFIL" => PjLinkCommand::FilterReplacementModelNumber2,
-            "2SVOL" => {
-                if transmission_parameter_len == 1 {
-                    let is_increase = transmission_parameter[0] == b'1';
-                    let is_decrease = transmission_parameter[0] == b'0';
-                    return PjLinkCommand::SpeakerVolumeAdjustment2(if is_increase {
-                        PjLinkVolumeCommandParameter::Increase
-                    } else if is_decrease {
-                        PjLinkVolumeCommandParameter::Decrase
-                    } else {
-                        PjLinkVolumeCommandParameter::Unknown
-                    })
-                }
-
-                return PjLinkCommand::Unknown;
-            },
-            "2MVOL" => {
-                if transmission_parameter_len == 1 {
-                    let is_increase = transmission_parameter[0] == b'1';
-                    let is_decrease = transmission_parameter[0] == b'0';
-                    return PjLinkCommand::MicrophoneVolumeAdjustment2(if is_increase {
-                        PjLinkVolumeCommandParameter::Increase
-                    } else if is_decrease {
-                        PjLinkVolumeCommandParameter::Decrase
-                    } else {
-                        PjLinkVolumeCommandParameter::Unknown
-                    })
-                }
-
-                return PjLinkCommand::Unknown;
-            },
-            "2FREZ" => {
-                if transmission_parameter_len == 1 {
-                    if transmission_parameter[0] == PJLINK_QUERY {
-                        return PjLinkCommand::Freeze2(PjLinkFreezeCommandParameter::Query);
-                    } else {
-                        let is_freeze = transmission_parameter[0] == b'1';
-                        let is_unfreeze = transmission_parameter[0] == b'0';
-                        return PjLinkCommand::Freeze2(if is_freeze {
-                            PjLinkFreezeCommandParameter::Freeze
-                        } else if is_unfreeze {
-                            PjLinkFreezeCommandParameter::Unfreeze
-                        } else {
-                            PjLinkFreezeCommandParameter::Unknown
-                        })
-                    }
-                }
-
-                return PjLinkCommand::Unknown;
-            },
-            _ => PjLinkCommand::Unknown
-        }
-    }
-
-    fn input_param_parse(
-        is_class_2: bool,
-        input_char: u8,
-        input_value: u8,
-    ) -> PjLinkInputCommandParameter {
-        let is_invalid_below = input_value < b'1';
-        let is_class_1_invalid_higher = !is_class_2 && (input_value > b'9');
-        let is_class_2_invalid_higher = is_class_2
-                                        && ((input_value > b'9' && input_value < b'A')
-                                            || input_value > b'Z');
-
-        if  is_invalid_below || is_class_1_invalid_higher || is_class_2_invalid_higher {
-            PjLinkInputCommandParameter::Unknown                        
-        } else {
-            match input_char {
-                b'1' => PjLinkInputCommandParameter::RGB(input_value),
-                b'2' => PjLinkInputCommandParameter::Video(input_value),
-                b'3' => PjLinkInputCommandParameter::Digital(input_value),
-                b'4' => PjLinkInputCommandParameter::Storage(input_value),
-                b'5' => PjLinkInputCommandParameter::Network(input_value),
-                b'6' => if is_class_2 {
-                    PjLinkInputCommandParameter::Internal(input_value)
-                } else {
-                    PjLinkInputCommandParameter::Unknown
-                }
-                _ => PjLinkInputCommandParameter::Unknown
-            }
-        } 
-    }
-
-    fn to_raw_response(raw_command: PjLinkRawPayload, response: PjLinkResponse, connection_id: &u64) -> PjLinkRawPayload {
-        let header_and_class: [u8; 2] = raw_command.header_and_class;
-        let command_body: [u8; 4] = raw_command.command_body;
-        let separator: u8 = PJLINK_RESPONSE_SEPARATOR;
-        let transmission_parameter: Vec<u8> = match response {
-            PjLinkResponse::Ok => Vec::from("OK"),
-            PjLinkResponse::OutOfParameter => Vec::from("ERR2"),
-            PjLinkResponse::UnavailableTime => Vec::from("ERR3"),
-            PjLinkResponse::ProjectorOrDisplayFailure => Vec::from("ERR4"),
-            PjLinkResponse::Undefined => Vec::from("ERR1"),
-            PjLinkResponse::Single(response_value) => Vec::from([response_value]),
-            PjLinkResponse::Multiple(response_value) => Vec::from(response_value),
-            PjLinkResponse::Empty => Vec::new(),
-        };
-        
-        debug!(
-            "Parsed Response: MessageId: {}, HeaderClass: {}, CmdBody: {}, Sep: {}, TxParam: {}",
-            *connection_id,
-            String::from_utf8(header_and_class.to_vec()).unwrap_or(String::new()),
-            String::from_utf8(command_body.to_vec()).unwrap_or(String::new()),
-            separator as char,
-            String::from_utf8(transmission_parameter.clone()).unwrap_or(String::new()),
-        );
-
-        return PjLinkRawPayload {
-            header_and_class,
-            command_body,
-            separator,
-            transmission_parameter,
-        };
-    }
-
-    fn to_raw_command(command: &mut Vec<u8>, connection_id: &u64) -> PjLinkRawPayload {
-        let mut header_and_class: [u8; 2] = Default::default();
-        let mut command_body: [u8; 4] = Default::default();
-        let transmission_parameter: Vec<u8> = command[7..command.len()].to_vec();
-
-        header_and_class.copy_from_slice(&command[0..2]);
-        command_body.copy_from_slice(&command[2..6]);
-
-        let command = PjLinkRawPayload {
-            header_and_class,
-            command_body,
-            separator: command[6],
-            transmission_parameter,
-        };
-
-        debug!(
-            "Parsed command. MessageId: {}; HeaderClass: {}; CmdBody: {}; Sep: {}, TxParam: {}",
-            *connection_id,
-            String::from_utf8(command.header_and_class.to_vec()).unwrap_or(String::new()),
-            String::from_utf8(command.command_body.to_vec()).unwrap_or(String::new()),
-            command.separator as char,
-            String::from_utf8(command.transmission_parameter.to_vec()).unwrap_or(String::new()),
-        );
-
-        return command;
-    }
 
     fn write_to_buffer(mut raw_response: PjLinkRawPayload) -> Vec<u8> {
         let mut buffer = Vec::<u8>::new();
@@ -930,7 +968,7 @@ impl PjLinkConnectionHandler {
             buffer.push(PJLINK_TERMINATOR);
         }
 
-        return buffer;
+        buffer
     }
 
     fn read_command(input_command_buffer: &mut Vec<u8>, stream: &mut TcpStream, connection_id: &u64) -> Result<(), io::Error> {
@@ -955,7 +993,7 @@ impl PjLinkConnectionHandler {
     fn send_multicast_message(message_origin: &mut SocketAddr, port: u16, output_buffer: Vec<u8>) {
         match UdpSocket::bind("0.0.0.0:0") {
             Ok(socket) => {
-                &message_origin.set_port(port);
+                message_origin.set_port(port);
 
                 debug!("UDP: Will send response to: {}", message_origin);
                 if let Err(e) = socket.connect(*message_origin) {
@@ -973,7 +1011,7 @@ impl PjLinkConnectionHandler {
 
                 debug!(
                     "UDP message sent! ParsedMessage: {:?}",
-                    String::from_utf8(output_buffer).unwrap_or(String::new())
+                    String::from_utf8(output_buffer).unwrap_or_default()
                 );
             },
             Err(e) => {
@@ -1001,16 +1039,16 @@ impl PjLinkConnectionHandler {
             debug!(
                 "PJLink Security: password; MessageId: {}, Response: {}",
                 *connection_id,
-                String::from_utf8(auth_buffer.clone()).unwrap_or(String::new())
+                String::from_utf8(auth_buffer.clone()).unwrap_or_default()
             );
             password_salt = Option::Some(string_salt);
             use_auth = true;
         }
 
-        stream.write(&auth_buffer).unwrap();
+        stream.write_all(&auth_buffer).unwrap();
         stream.flush().unwrap();
 
-        return (use_auth, password_salt);
+        (use_auth, password_salt)
     }
 
     fn handle_password_hash_response(
@@ -1039,7 +1077,7 @@ impl PjLinkConnectionHandler {
                 debug!(
                     "Received password hash! MessageId: {}, Hash: {}",
                     *connection_id,
-                    String::from_utf8(input_password_hash.to_vec()).unwrap_or(String::new())
+                    String::from_utf8(input_password_hash.to_vec()).unwrap_or_default()
                 );
 
                 if format!("{:x}", internal_password_hash).as_bytes() == input_password_hash {
@@ -1066,19 +1104,19 @@ impl PjLinkConnectionHandler {
             input_command_buffer.drain(0..32);
         }
 
-        return Result::Ok(has_authenticated_response);
+        Result::Ok(has_authenticated_response)
     }
 
     fn generate_random_number() -> u32 {
         let mut rng = rand::thread_rng();
-        return rng.next_u32()
+        rng.next_u32()
     }
 
     fn generate_nullified_security(buffer: &mut Vec<u8>) {
         buffer.extend(PJLINK_NULLIFIED_SECURITY);
     }
 
-    fn generate_password_security(buffer: &mut Vec<u8>, number: &String) {
+    fn generate_password_security(buffer: &mut Vec<u8>, number: &str) {
         buffer.extend(PJLINK_SECURITY);
         buffer.extend(number.as_bytes());
         buffer.push(PJLINK_TERMINATOR);
@@ -1097,46 +1135,46 @@ mod tests {
 
     impl PjLinkHandler for PjLinkMockHandler {
         fn handle_command(&mut self, command: PjLinkCommand, raw_command: &PjLinkRawPayload) -> PjLinkResponse {
-            return (self.handle_command_fn)(command, raw_command);
+            (self.handle_command_fn)(command, raw_command)
         }
 
         fn get_password(&mut self) -> Option<String> {
-            return (self.get_password_fn)();
+            (self.get_password_fn)()
         }
     }
 
-    fn simple_mock_handler() -> PjLinkHandlerShared {
-        return Arc::new(Mutex::new(PjLinkMockHandler {
-            handle_command_fn: |command, raw_command| PjLinkResponse::OutOfParameter,
+    fn _simple_mock_handler() -> PjLinkHandlerShared {
+        Arc::new(Mutex::new(PjLinkMockHandler {
+            handle_command_fn: |_command, _raw_command| PjLinkResponse::OutOfParameter,
             get_password_fn: || Option::None
-        }));
+        }))
     }
 
     #[test]
     fn it_converts_1powr_query_to_powr_query_enum() {
         let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![PJLINK_QUERY]);
-        let command = PjLinkConnectionHandler::get_command(&raw_command);
-        assert!(if let PjLinkCommand::Power1(PjLinkPowerCommandParameter::Query) = command {true} else {false});
+        let command = PjLinkCommand::from_raw_payload(&raw_command);
+        assert!(matches!(command, PjLinkCommand::Power1(PjLinkPowerCommandParameter::Query)));
     }
 
     #[test]
     fn it_converts_1powr_on_to_powr_on_enum() {
         let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'1']);
-        let command = PjLinkConnectionHandler::get_command(&raw_command);
-        assert!(if let PjLinkCommand::Power1(PjLinkPowerCommandParameter::On) = command {true} else {false});
+        let command = PjLinkCommand::from_raw_payload(&raw_command);
+        assert!(matches!(command, PjLinkCommand::Power1(PjLinkPowerCommandParameter::On)));
     }
 
     #[test]
     fn it_converts_1powr_off_to_powr_off_enum() {
         let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'0']);
-        let command = PjLinkConnectionHandler::get_command(&raw_command);
-        assert!(if let PjLinkCommand::Power1(PjLinkPowerCommandParameter::Off) = command {true} else {false});
+        let command = PjLinkCommand::from_raw_payload(&raw_command);
+        assert!(matches!(command, PjLinkCommand::Power1(PjLinkPowerCommandParameter::Off)));
     }
 
     #[test]
     fn it_converts_1powr_garbage_to_powr_unknown_enum() {
         let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'b', b'2']);
-        let command = PjLinkConnectionHandler::get_command(&raw_command);
-        assert!(if let PjLinkCommand::Power1(PjLinkPowerCommandParameter::Unknown) = command {true} else {false});
+        let command = PjLinkCommand::from_raw_payload(&raw_command);
+        assert!(matches!(command, PjLinkCommand::Power1(PjLinkPowerCommandParameter::Unknown)));
     }
 }

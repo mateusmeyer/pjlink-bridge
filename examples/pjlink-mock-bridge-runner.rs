@@ -127,7 +127,7 @@ struct PjLinkMockProjector {
 
 impl PjLinkMockProjector {
     fn new(options: PjLinkMockProjectorOptions) -> Self {
-        return PjLinkMockProjector {
+        PjLinkMockProjector {
             options,
             state: PjLinkMockProjectorState {
                 power_on: PjLinkPowerCommandStatus::Off,
@@ -156,27 +156,27 @@ impl PjLinkMockProjector {
 impl PjLinkHandler for PjLinkMockProjector{
 
     fn handle_command(&mut self, command: PjLinkCommand, _raw_command: &PjLinkRawPayload) -> PjLinkResponse {
-        return match command {
+        match command {
             // #region Power Control Instruction / POWR
             PjLinkCommand::Power1(PjLinkPowerCommandParameter::Query) => {
                 info!("Query Power Status");
-                return PjLinkResponse::Single(self.state.power_on)
+                PjLinkResponse::Single(self.state.power_on)
             }
             PjLinkCommand::Power1(PjLinkPowerCommandParameter::On) => {
                 info!("Power On Projector");
                 self.state.power_on = PjLinkPowerCommandStatus::On;
-                return PjLinkResponse::Ok;
+                PjLinkResponse::Ok
             }
             PjLinkCommand::Power1(PjLinkPowerCommandParameter::Off) => {
                 info!("Power Off Projector");
                 self.state.power_on = PjLinkPowerCommandStatus::Off;
-                return PjLinkResponse::Ok;
+                PjLinkResponse::Ok
             }
             // #endregion
             // #region Input Switch Instruction / INPT
             PjLinkCommand::Input1(PjLinkInputCommandParameter::Query) | PjLinkCommand::Input2(PjLinkInputCommandParameter::Query) => {
                 info!("Input1|2 Query");
-                return PjLinkResponse::Multiple(Vec::from(self.state.input_status));
+                PjLinkResponse::Multiple(Vec::from(self.state.input_status))
             },
             PjLinkCommand::Input1(input) | PjLinkCommand::Input2(input) => {
                 info!("Input1|2 Set");
@@ -203,13 +203,13 @@ impl PjLinkHandler for PjLinkMockProjector{
                     _ => return PjLinkResponse::OutOfParameter
                 };
 
-                return PjLinkResponse::Ok;
+                PjLinkResponse::Ok
             },
             // #endregion
             // #region Mute Instruction / AVMT
             PjLinkCommand::AvMute1(PjLinkMuteCommandParameter::Query) => {
                 info!("AV Mute Query");
-                return PjLinkResponse::Multiple(Vec::from(self.state.mute_status))
+                PjLinkResponse::Multiple(Vec::from(self.state.mute_status))
             }
             PjLinkCommand::AvMute1(parameter) => {
                 info!("AV Mute Set");
@@ -220,23 +220,19 @@ impl PjLinkHandler for PjLinkMockProjector{
                     PjLinkMuteCommandParameter::Audio(mute) => {
                         self.state.mute_status = if current_muted_item == PjLinkMuteCommandStatus::Video && is_muted && mute {
                             [PjLinkMuteCommandStatus::AudioAndVideo, PjLinkMuteCommandStatus::Mute]
+                        } else if current_muted_item == PjLinkMuteCommandStatus::AudioAndVideo && is_muted && !mute {
+                            [PjLinkMuteCommandStatus::Video, PjLinkMuteCommandStatus::Mute]
                         } else {
-                            if current_muted_item == PjLinkMuteCommandStatus::AudioAndVideo && is_muted && !mute {
-                                [PjLinkMuteCommandStatus::Video, PjLinkMuteCommandStatus::Mute]
-                            } else {
-                                [current_muted_item, if mute {PjLinkMuteCommandStatus::Mute} else {PjLinkMuteCommandStatus::NonMute}]
-                            }
+                            [current_muted_item, if mute {PjLinkMuteCommandStatus::Mute} else {PjLinkMuteCommandStatus::NonMute}]
                         }
                     }
                     PjLinkMuteCommandParameter::Video(mute) => {
                         self.state.mute_status = if current_muted_item == PjLinkMuteCommandStatus::Audio && is_muted && mute {
                             [PjLinkMuteCommandStatus::AudioAndVideo, PjLinkMuteCommandStatus::Mute]
+                        } else if current_muted_item == PjLinkMuteCommandStatus::AudioAndVideo && is_muted && !mute {
+                            [PjLinkMuteCommandStatus::Audio, PjLinkMuteCommandStatus::Mute]
                         } else {
-                            if current_muted_item == PjLinkMuteCommandStatus::AudioAndVideo && is_muted && !mute {
-                                [PjLinkMuteCommandStatus::Audio, PjLinkMuteCommandStatus::Mute]
-                            } else {
-                                [current_muted_item, if mute {PjLinkMuteCommandStatus::Mute} else {PjLinkMuteCommandStatus::NonMute}]
-                            }
+                            [current_muted_item, if mute {PjLinkMuteCommandStatus::Mute} else {PjLinkMuteCommandStatus::NonMute}]
                         }
                     }
                     PjLinkMuteCommandParameter::AudioAndVideo(mute) => {
@@ -250,20 +246,20 @@ impl PjLinkHandler for PjLinkMockProjector{
                     }
                 }
 
-                return PjLinkResponse::Ok;
+                PjLinkResponse::Ok
             }
             // #endregion  
             // #region Error Status Query / ERST
             PjLinkCommand::ErrorStatus1 => {
                 info!("Error Status Query");
-                return PjLinkResponse::Multiple(vec![
+                PjLinkResponse::Multiple(vec![
                     self.state.error_fan_status,
                     self.state.error_lamp_status,
                     self.state.error_temperature_status,
                     self.state.error_cover_open_status,
                     self.state.error_filter_status,
                     self.state.error_other_status
-                ]);
+                ])
             }
             // #endregion
             // #region Lamp Number/Lighting Hour Query / LAMP
@@ -272,55 +268,55 @@ impl PjLinkHandler for PjLinkMockProjector{
                 let mut hours = self.state.lamp_hours.clone();
                 hours.push(b' ');
                 hours.push(self.state.power_on);
-                return PjLinkResponse::Multiple(hours);
+                PjLinkResponse::Multiple(hours)
             }
             // #endregion
             // #region Input Toggling List Query / INST
             PjLinkCommand::InputTogglingList1 | PjLinkCommand::InputTogglingList2 => {
                 info!("Input Toggling List Query");
-                return PjLinkResponse::Multiple(self.state.available_inputs.clone())
+                PjLinkResponse::Multiple(self.state.available_inputs.clone())
             }
             // #endregion
             // #region Projector/Display Name Query / NAME
             PjLinkCommand::Name1 => {
                 info!("Name Query");
-                return PjLinkResponse::Multiple(self.options.projector_name.clone());
+                PjLinkResponse::Multiple(self.options.projector_name.clone())
             }
             // #endregion
             // #region Manufacture Name Information Query / INF1
             PjLinkCommand::InfoManufacturer1 => {
                 info!("Info Manufacturer Query");
-                return PjLinkResponse::Multiple(self.options.manufacturer_name.clone());
+                PjLinkResponse::Multiple(self.options.manufacturer_name.clone())
             }
             // #endregion
             // #region Product Name Information Query / INF2
             PjLinkCommand::InfoProductName1 => {
                 info!("Info Product Name Query");
-                return PjLinkResponse::Multiple(self.options.product_name.clone());
+                PjLinkResponse::Multiple(self.options.product_name.clone())
             }
             // #endregion
             // #region Other Information Query / INFO
             PjLinkCommand::InfoOther1 => {
                 info!("Info Other Query");
-                return PjLinkResponse::Multiple(vec![]);
+                PjLinkResponse::Multiple(vec![])
             }
             // #endregion
             // #region Class Information Query / CLSS
             PjLinkCommand::Class1 => {
                 info!("Class Information Query");
-                return PjLinkResponse::Single(self.options.class_type)
+                PjLinkResponse::Single(self.options.class_type)
             }
             // #endregion
             // #region Serial Number Query / SNUM
             PjLinkCommand::SerialNumber2 => {
                 info!("Serial Number Query");
-                return PjLinkResponse::Multiple(self.options.serial_number.clone());
+                PjLinkResponse::Multiple(self.options.serial_number.clone())
             }
             // #endregion
             // #region Software Version Query / SVER
             PjLinkCommand::SoftwareVersion2 => {
                 info!("Software Version Query");
-                return PjLinkResponse::Multiple(self.options.software_version.clone());
+                PjLinkResponse::Multiple(self.options.software_version.clone())
             }
             // #endregion
             // #region Input Terminal Name Query / INNM
@@ -340,31 +336,31 @@ impl PjLinkHandler for PjLinkMockProjector{
             // #region Input Resolution Query / IRES
             PjLinkCommand::InputResolution2 => {
                 info!("Input Resolution Query");
-                return PjLinkResponse::Multiple(self.options.screen_resolution.clone());
+                PjLinkResponse::Multiple(self.options.screen_resolution.clone())
             }
             // #endregion
             // #region Recommend Resolution Query / RRES
             PjLinkCommand::RecommendResolution2 => {
                 info!("Recommend Resolution Query");
-                return PjLinkResponse::Multiple(self.options.recommended_screen_resolution.clone());
+                PjLinkResponse::Multiple(self.options.recommended_screen_resolution.clone())
             }
             // #endregion
             // #region Filter Usage Time Query / FILT
             PjLinkCommand::FilterUsageTime2 => {
                 info!("Filter Usage Time Query");
-                return PjLinkResponse::Multiple(self.state.filter_hours.clone());
+                PjLinkResponse::Multiple(self.state.filter_hours.clone())
             }
             // #endregion
             // #region Lamp Replacement Model Number Query / RLMP
             PjLinkCommand::LampReplacementModelNumber2 => {
                 info!("Lamp Replacement Model Number Query");
-                return PjLinkResponse::Empty
+                PjLinkResponse::Empty
             }
             // #endregion
             // #region Filter Replacement Model Number Query / RFIL
             PjLinkCommand::FilterReplacementModelNumber2 => {
                 info!("Filter Replacement Model Number Query");
-                return PjLinkResponse::Empty;
+                PjLinkResponse::Empty
             }
             // #endregion
             // #region Speaker Volume Adjustment Instruction / SVOL
@@ -390,7 +386,7 @@ impl PjLinkHandler for PjLinkMockProjector{
             // #region Freeze Instruction / FREZ
             PjLinkCommand::Freeze2(PjLinkFreezeCommandParameter::Query) => {
                 info!("Freeze Instruction Query");
-                return PjLinkResponse::Single(self.state.freeze_status)
+                PjLinkResponse::Single(self.state.freeze_status)
             }
             PjLinkCommand::Freeze2(instruction) => {
                 info!("Freeze Instruction Set");
@@ -399,7 +395,7 @@ impl PjLinkHandler for PjLinkMockProjector{
                     PjLinkFreezeCommandParameter::Unfreeze => b'0',
                     _ => return PjLinkResponse::OutOfParameter
                 };
-                return PjLinkResponse::Ok;
+                PjLinkResponse::Ok
             }
             // #endregion
             _ => PjLinkResponse::OutOfParameter
@@ -407,6 +403,6 @@ impl PjLinkHandler for PjLinkMockProjector{
     }
 
     fn get_password(&mut self) -> Option<String> {
-        return self.options.password.clone();
+        self.options.password.clone()
     }
 }
