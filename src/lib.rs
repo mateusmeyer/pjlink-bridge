@@ -363,7 +363,6 @@ pub enum PjLinkPowerCommandParameter {
 }
 
 /// Response status for [1POWR](self::PjLinkCommand::Power1) command
-
 pub struct PjLinkPowerCommandStatus;
 #[allow(non_upper_case_globals)]
 impl PjLinkPowerCommandStatus {
@@ -401,7 +400,9 @@ impl PjLinkErrorStatusCommandStatusItem {
     pub const Error: u8 = b'2';
 }
 
+/// Parameter for [1INPT](self::PjLinkCommand::Input1) command 
 pub enum PjLinkInputCommandParameter {
+    /// 
     RGB(u8),
     Video(u8),
     Digital(u8),
