@@ -85,9 +85,12 @@ pub fn main() {
 
     if opts.udp {
         let udp_bind_address = opts.udp_listen_address;
-        PjLinkServer::listen_tcp_udp(shared_handler, tcp_bind_address, udp_bind_address, opts.port);
+        let (tcp_handle, _udp_handle) = PjLinkServer::listen_tcp_udp(shared_handler, tcp_bind_address, udp_bind_address, opts.port);
+
+        tcp_handle.join().unwrap();
     } else {
-        PjLinkServer::listen_tcp_only(shared_handler, tcp_bind_address, opts.port);
+        let tcp_handle = PjLinkServer::listen_tcp_only(shared_handler, tcp_bind_address, opts.port);
+        tcp_handle.join().unwrap();
     }
 
 }

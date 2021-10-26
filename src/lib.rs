@@ -19,7 +19,7 @@
 
 //#![deny(missing_docs)]
 
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::sync::{
     Mutex,
     Arc,
@@ -697,7 +697,7 @@ impl PjLinkServer{
         tcp_bind_address: String,
         udp_bind_address: String,
         port: String,
-    ) {
+    ) -> (JoinHandle<()>, JoinHandle<()>) {
         let tcp_listener = TcpListener::bind(format!("{}:{}", tcp_bind_address, port)).unwrap();
 
         let udp_socket = UdpSocket::bind(format!("{}:{}", udp_bind_address, port)).unwrap();
@@ -709,23 +709,25 @@ impl PjLinkServer{
             Self::listen_tcp_internal(tcp_bind_address.clone(), listener.clone());
         });
 
-        thread::spawn(move || {
+        let udp_handle = thread::spawn(move || {
             info!("Running UDP Listener on {}:{}", udp_address_clone, port);
             listener_clone.listen_multicast();
         });
 
-        handle.join().unwrap();
+        (handle, udp_handle)
     }
 
     pub fn listen_tcp_only(
         handler: PjLinkHandlerShared,
         tcp_bind_address: String,
         port: String
-    ) {
+    ) -> JoinHandle<()> {
         let tcp_listener = TcpListener::bind(format!("{}:{}", tcp_bind_address, port)).unwrap();
         let listener = PjLinkListener::new_without_broadcast(handler, tcp_listener);
         
-        Self::listen_tcp_internal(tcp_bind_address, Arc::new(listener));
+        thread::spawn(move || {
+            Self::listen_tcp_internal(tcp_bind_address, Arc::new(listener));
+        })
     }
 
     fn listen_tcp_internal(address: String, listener: PjLinkListenerShared<'static>) {
