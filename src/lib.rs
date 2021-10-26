@@ -689,21 +689,25 @@ pub trait PjLinkHandler: Sync + Send {
 
 pub type PjLinkHandlerShared = Arc<Mutex<dyn PjLinkHandler>>;
 
+pub type PjLinkServerTcpOnlyResult<'a> = (Arc<PjLinkListener<'a>>, JoinHandle<()>);
+pub type PjLinkServerTcpUdpResult<'a> = (Arc<PjLinkListener<'a>>, JoinHandle<()>, JoinHandle<()>);
+
 pub struct PjLinkServer {}
 
 impl PjLinkServer{
-    pub fn listen_tcp_udp(
+    pub fn listen_tcp_udp<'a>(
         handler: PjLinkHandlerShared,
         tcp_bind_address: String,
         udp_bind_address: String,
         port: String,
-    ) -> (JoinHandle<()>, JoinHandle<()>) {
+    ) -> PjLinkServerTcpUdpResult<'a> {
         let tcp_listener = TcpListener::bind(format!("{}:{}", tcp_bind_address, port)).unwrap();
 
         let udp_socket = UdpSocket::bind(format!("{}:{}", udp_bind_address, port)).unwrap();
         let listener = PjLinkListener::new(handler, tcp_listener, udp_socket);
         let udp_address_clone = udp_bind_address;
         let listener_clone = listener.clone();
+        let listener_result_clone = listener.clone();
         
         let handle = thread::spawn(move || {
             Self::listen_tcp_internal(tcp_bind_address.clone(), listener.clone());
@@ -714,20 +718,23 @@ impl PjLinkServer{
             listener_clone.listen_multicast();
         });
 
-        (handle, udp_handle)
+        (listener_result_clone.clone(), handle, udp_handle)
     }
 
-    pub fn listen_tcp_only(
+    pub fn listen_tcp_only<'a>(
         handler: PjLinkHandlerShared,
         tcp_bind_address: String,
         port: String
-    ) -> JoinHandle<()> {
+    ) -> PjLinkServerTcpOnlyResult<'a> {
         let tcp_listener = TcpListener::bind(format!("{}:{}", tcp_bind_address, port)).unwrap();
         let listener = PjLinkListener::new_without_broadcast(handler, tcp_listener);
+        let listener_clone = listener.clone();
         
-        thread::spawn(move || {
-            Self::listen_tcp_internal(tcp_bind_address, Arc::new(listener));
-        })
+        let handle = thread::spawn(move || {
+            Self::listen_tcp_internal(tcp_bind_address, listener);
+        });
+
+        (listener_clone, handle)
     }
 
     fn listen_tcp_internal(address: String, listener: PjLinkListenerShared<'static>) {
@@ -764,14 +771,14 @@ impl<'a> PjLinkListener<'a> {
     pub fn new_without_broadcast(
         shared_handler: Arc<Mutex<dyn PjLinkHandler>>,
         tcp_listener: TcpListener
-    ) -> Self {
-        PjLinkListener {
+    ) -> PjLinkListenerShared<'a> {
+        Arc::new(PjLinkListener {
             _nil: &false,
             shared_handler,
             shared_connection_counter: Arc::new(AtomicU64::new(0)),
             tcp_listener,
             udp_socket: Option::None,
-        }
+        })
     }
 
     pub fn listen(&self) {
@@ -816,7 +823,7 @@ impl<'a> PjLinkListener<'a> {
 
 struct PjLinkConnectionHandler {
     handler: Arc<Mutex<dyn PjLinkHandler>>,
-    shared_connection_counter: Arc<AtomicU64>
+    shared_connection_counter: Arc<AtomicU64>,
 }
 
 impl PjLinkConnectionHandler {
