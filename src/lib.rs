@@ -26,12 +26,7 @@ use std::sync::{
     atomic,
     atomic::AtomicU64
 };
-use std::net::{
-    TcpListener,
-    TcpStream,
-    UdpSocket,
-    SocketAddr
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::io;
 use std::io::{Read, Write};
 use rand::prelude::*;
@@ -102,7 +97,7 @@ const PJLINK_BROADCAST_SEARCH_START: &[u8; 7] = b"%2SRCH\x0d";
 /// 
 /// ### Usage in response string
 /// ```"%2ACKN=00:00:00:00:00:00\x0d"```
-pub const PJLINK_BROADCAST_MESSAGE_ACKN: &[u8; 4] = b"ACKN";
+pub const PJLINK_BROADCAST_MESSAGE_ACKN: &[u8; 5] = b"2ACKN";
 /// PJLink Class 2 Lookup Notify command body (LKUP)
 /// 
 /// This is the command body used for spontaneous lookup message from projector
@@ -110,7 +105,7 @@ pub const PJLINK_BROADCAST_MESSAGE_ACKN: &[u8; 4] = b"ACKN";
 /// 
 /// ### Usage in response string
 /// ```"%2LKUP=00:00:00:00:00:00\x0d"```
-pub const PJLINK_BROADCAST_MESSAGE_LKUP: &[u8; 4] = b"LKUP";
+pub const PJLINK_BROADCAST_MESSAGE_LKUP: &[u8; 5] = b"2LKUP";
 /// PJLink Class 2 Error Status Notify command body (ERST)
 /// 
 /// This is the command body used for spontaneous error status change message
@@ -118,7 +113,7 @@ pub const PJLINK_BROADCAST_MESSAGE_LKUP: &[u8; 4] = b"LKUP";
 /// 
 /// ### Usage in response string
 /// ```"%2ERST=001000\x0d"```
-pub const PJLINK_BROADCAST_MESSAGE_ERST: &[u8; 4] = b"ERST";
+pub const PJLINK_BROADCAST_MESSAGE_ERST: &[u8; 5] = b"2ERST";
 /// PJLink Class 2 Power Status Notify command body (POWR)
 /// 
 /// This is the command body used for spontaneous power status change message
@@ -126,7 +121,7 @@ pub const PJLINK_BROADCAST_MESSAGE_ERST: &[u8; 4] = b"ERST";
 /// 
 /// ### Usage in response string
 /// ```"%2POWR=1\x0d"```
-pub const PJLINK_BROADCAST_MESSAGE_POWR: &[u8; 4] = b"POWR";
+pub const PJLINK_BROADCAST_MESSAGE_POWR: &[u8; 5] = b"2POWR";
 /// PJLink Class 2 Input Notiy command body (POWER)
 /// 
 /// This is the command body used for spontaneous input change message
@@ -134,7 +129,7 @@ pub const PJLINK_BROADCAST_MESSAGE_POWR: &[u8; 4] = b"POWR";
 /// 
 /// ### Usage in response string
 /// ```"%2INPT=32\x0d"```
-pub const PJLINK_BROADCAST_MESSAGE_INPT: &[u8; 4] = b"INPT";
+pub const PJLINK_BROADCAST_MESSAGE_INPT: &[u8; 5] = b"2INPT";
 
 /// The maximum size of UDP datagrams sent to the server.
 /// 
@@ -173,16 +168,13 @@ const PJLINK_MAX_BROADCAST_BUFFER_SIZE: usize = 25;
 /// }
 /// ```
 pub struct PjLinkRawPayload {
-    /// Combines [PJLink's header](self::PJLINK_HEADER) and command class together.
-    header_and_class: [u8; 2],
-    /// Contains PJLink's command body, without the class
-    /// See [header_and_class](self::PjLinkRawPayload.header_class)
-    command_body: [u8; 4],
+    /// Contains PJLink's command body, with the class
+    pub command_body_with_class: [u8; 5],
     /// Message separator.
     /// [PJLINK_COMMAND_SEPARATOR](self::PJLINK_COMMAND_SEPARATOR) for a command,
     /// [PJLINK_RESPONSE_SEPARATOR](self::PJLINK_RESPONSE_SEPARATOR) for a response,
-    separator: u8,
-    transmission_parameter: Vec<u8>,
+    pub separator: u8,
+    pub transmission_parameter: Vec<u8>,
 }
 
 impl PjLinkRawPayload {
@@ -194,13 +186,11 @@ impl PjLinkRawPayload {
     /// * `command_body`: PJLink command body. Value example: `*b"POWR"`
     /// * `transmission_parameter`: PJLink transmission parameter.`
     pub fn new_command(
-        class: u8,
-        command_body: [u8; 4],
+        command_body_with_class: [u8; 5],
         transmission_parameter: Vec<u8>
     ) -> PjLinkRawPayload {
         PjLinkRawPayload {
-            header_and_class: [PJLINK_HEADER, class],
-            command_body,
+            command_body_with_class,
             separator: PJLINK_COMMAND_SEPARATOR,
             transmission_parameter
         }
@@ -215,13 +205,11 @@ impl PjLinkRawPayload {
     /// * `command_body`: PJLink command body. Value example: `*b"POWR"`
     /// * `transmission_parameter`: PJLink transmission parameter.`
     pub fn new_response(
-        class: u8,
-        command_body: [u8; 4],
+        command_body_with_class: [u8; 5],
         transmission_parameter: Vec<u8>
     ) -> PjLinkRawPayload {
         PjLinkRawPayload {
-            header_and_class: [PJLINK_HEADER, class],
-            command_body,
+            command_body_with_class,
             separator: PJLINK_RESPONSE_SEPARATOR,
             transmission_parameter
         }
@@ -234,25 +222,21 @@ impl PjLinkRawPayload {
     /// * `buffer`: Raw PJLink instruction buffer
     /// * `connection_id`: Connection ID
     pub fn from_buffer(buffer: &mut Vec<u8>, connection_id: &u64) -> PjLinkRawPayload {
-        let mut header_and_class: [u8; 2] = Default::default();
-        let mut command_body: [u8; 4] = Default::default();
+        let mut command_body_with_class: [u8; 5] = Default::default();
         let transmission_parameter: Vec<u8> = buffer[7..buffer.len()].to_vec();
 
-        header_and_class.copy_from_slice(&buffer[0..2]);
-        command_body.copy_from_slice(&buffer[2..6]);
+        command_body_with_class.copy_from_slice(&buffer[1..6]);
 
         let command = PjLinkRawPayload {
-            header_and_class,
-            command_body,
+            command_body_with_class,
             separator: buffer[6],
             transmission_parameter,
         };
 
         debug!(
-            "Parsed command. MessageId: {}; HeaderClass: {}; CmdBody: {}; Sep: {}, TxParam: {}",
+            "Parsed command. MessageId: {}; CmdBodyWithClass: {}; Sep: {}, TxParam: {}",
             *connection_id,
-            String::from_utf8(command.header_and_class.to_vec()).unwrap_or_default(),
-            String::from_utf8(command.command_body.to_vec()).unwrap_or_default(),
+            String::from_utf8(command.command_body_with_class.to_vec()).unwrap_or_default(),
             command.separator as char,
             String::from_utf8(command.transmission_parameter.to_vec()).unwrap_or_default()
         );
@@ -267,9 +251,6 @@ impl PjLinkRawPayload {
     /// * `response`: [PjLinkResponse](self::PjLinkResponse) enum item
     /// * `connection_id`: Connection ID
     pub fn update_with_response(self, response: PjLinkResponse, connection_id: &u64) -> PjLinkRawPayload {
-        let header_and_class: [u8; 2] = self.header_and_class;
-        let command_body: [u8; 4] = self.command_body;
-        let separator: u8 = PJLINK_RESPONSE_SEPARATOR;
         let transmission_parameter: Vec<u8> = match response {
             PjLinkResponse::Ok => Vec::from("OK"),
             PjLinkResponse::OutOfParameter => Vec::from("ERR2"),
@@ -280,19 +261,19 @@ impl PjLinkRawPayload {
             PjLinkResponse::Multiple(response_value) => response_value,
             PjLinkResponse::Empty => Vec::new(),
         };
+        let command_body_with_class: [u8; 5] = self.command_body_with_class;
+        let separator: u8 = PJLINK_RESPONSE_SEPARATOR;
         
         debug!(
-            "Parsed Response: MessageId: {}, HeaderClass: {}, CmdBody: {}, Sep: {}, TxParam: {}",
+            "Parsed Response: MessageId: {}, CmdBodyWithClass: {}, Sep: {}, TxParam: {}",
             *connection_id,
-            String::from_utf8(header_and_class.to_vec()).unwrap_or_default(),
-            String::from_utf8(command_body.to_vec()).unwrap_or_default(),
+            String::from_utf8(command_body_with_class.to_vec()).unwrap_or_default(),
             separator as char,
             String::from_utf8(transmission_parameter.clone()).unwrap_or_default()
         );
 
         PjLinkRawPayload {
-            header_and_class,
-            command_body,
+            command_body_with_class,
             separator,
             transmission_parameter,
         }
@@ -498,12 +479,11 @@ pub enum PjLinkCommand {
 impl PjLinkCommand {
     pub fn from_raw_payload(raw_command: &PjLinkRawPayload) -> PjLinkCommand {
         let transmission_parameter = &raw_command.transmission_parameter;
-        let class = raw_command.header_and_class[1];
-        let mut command_body_string = std::str::from_utf8(&[class]).unwrap().to_owned();
-        command_body_string.push_str(
-            std::str::from_utf8(&raw_command.command_body).unwrap()
-        );
-        let command_body_str = command_body_string.as_str();
+        let class = raw_command.command_body_with_class[0];
+        let command_body_str = match std::str::from_utf8(&raw_command.command_body_with_class) {
+            Ok(string) => string,
+            Err(_) => return PjLinkCommand::Unknown
+        };
         let is_class_2 = class == b'2';
         let transmission_parameter_len = transmission_parameter.len();
 
@@ -708,13 +688,15 @@ impl PjLinkServer{
         let udp_address_clone = udp_bind_address;
         let listener_clone = listener.clone();
         let listener_result_clone = listener.clone();
+
+        let port_clone = port.clone();
         
         let handle = thread::spawn(move || {
-            Self::listen_tcp_internal(tcp_bind_address.clone(), listener.clone());
+            Self::listen_tcp_internal(tcp_bind_address.clone(), port, listener.clone());
         });
 
         let udp_handle = thread::spawn(move || {
-            info!("Running UDP Listener on {}:{}", udp_address_clone, port);
+            info!("Running UDP Listener on {}:{}", udp_address_clone, port_clone);
             listener_clone.listen_multicast();
         });
 
@@ -731,14 +713,14 @@ impl PjLinkServer{
         let listener_clone = listener.clone();
         
         let handle = thread::spawn(move || {
-            Self::listen_tcp_internal(tcp_bind_address, listener);
+            Self::listen_tcp_internal(tcp_bind_address, port, listener);
         });
 
         (listener_clone, handle)
     }
 
-    fn listen_tcp_internal(address: String, listener: PjLinkListenerShared<'static>) {
-        info!("Running TCP Listener on {}", address);
+    fn listen_tcp_internal(address: String, port: String, listener: PjLinkListenerShared<'static>) {
+        info!("Running TCP Listener on {}:{}", address, port);
         listener.listen();
     }
 }
@@ -826,6 +808,11 @@ struct PjLinkConnectionHandler {
     shared_connection_counter: Arc<AtomicU64>,
 }
 
+#[inline(always)]
+fn get_empty_socket_addr<E>(e: E) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0)
+}
+
 impl PjLinkConnectionHandler {
     fn handle_connection(&mut self, mut stream: TcpStream) {
         let lock_handler = &self.handler; 
@@ -837,14 +824,21 @@ impl PjLinkConnectionHandler {
 
         if let Ok(mut handler) = lock_handler.lock() {
             password = handler.get_password();
-            let (use_auth_result, password_salt_result) = Self::handle_password_input(&mut stream, &password, &connection_id);
-            use_auth = use_auth_result;
-            password_salt = password_salt_result;
+            match Self::handle_password_input(&mut stream, &password, &connection_id) {
+                Ok((use_auth_result, password_salt_result)) => {
+                    use_auth = use_auth_result;
+                    password_salt = password_salt_result;
+                }
+                Err(e) => {
+                    debug!("Failed to read password! MessageId: {}, {}", connection_id, e);
+                    return;
+                }
+            }
         }
 
         'message: loop {
             let mut input_command_buffer = Vec::<u8>::new();
-            debug!("Waiting for command! MessageId: {}, Host: {}", connection_id, stream.peer_addr().unwrap());
+            debug!("Waiting for command! MessageId: {}, Host: {}", connection_id, stream.peer_addr().unwrap_or_else(get_empty_socket_addr));
 
             if let Err(e) = Self::read_command(&mut input_command_buffer, &mut stream, &connection_id) {
                 debug!("Failed to read command! MessageId: {}, {}", connection_id, e);
@@ -950,8 +944,7 @@ impl PjLinkConnectionHandler {
                 };
 
                 let response = PjLinkRawPayload {
-                    header_and_class: [PJLINK_HEADER, b'2'],
-                    command_body: *PJLINK_BROADCAST_MESSAGE_ACKN,
+                    command_body_with_class: *PJLINK_BROADCAST_MESSAGE_ACKN,
                     separator: PJLINK_RESPONSE_SEPARATOR,
                     transmission_parameter: Vec::from(mac_address)
                 };
@@ -964,9 +957,8 @@ impl PjLinkConnectionHandler {
 
 
     fn write_to_buffer(mut raw_response: PjLinkRawPayload) -> Vec<u8> {
-        let mut buffer = Vec::<u8>::new();
-        buffer.extend(&raw_response.header_and_class);
-        buffer.extend(&raw_response.command_body);
+        let mut buffer = vec![PJLINK_HEADER];
+        buffer.extend(&raw_response.command_body_with_class);
         buffer.push(raw_response.separator);
 
         buffer.append(&mut raw_response.transmission_parameter);
@@ -1035,7 +1027,7 @@ impl PjLinkConnectionHandler {
         stream: &mut TcpStream,
         password: &Option<String>,
         connection_id: &u64,
-    ) -> (bool, Option<String>) {
+    ) -> Result<(bool, Option<String>), io::Error> {
         let mut auth_buffer = Vec::<u8>::new();
         let mut password_salt = Option::None;
         let mut use_auth = false;
@@ -1055,10 +1047,14 @@ impl PjLinkConnectionHandler {
             use_auth = true;
         }
 
-        stream.write_all(&auth_buffer).unwrap();
-        stream.flush().unwrap();
+        if let Err(err) = stream.write_all(&auth_buffer) {
+            return Err(err);
+        }
+        if let Err(err) = stream.flush() {
+            return Err(err);
+        };
 
-        (use_auth, password_salt)
+        Ok((use_auth, password_salt))
     }
 
     fn handle_password_hash_response(
@@ -1162,28 +1158,28 @@ mod tests {
 
     #[test]
     fn it_converts_1powr_query_to_powr_query_enum() {
-        let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![PJLINK_QUERY]);
+        let raw_command = PjLinkRawPayload::new_command(*b"1POWR", vec![PJLINK_QUERY]);
         let command = PjLinkCommand::from_raw_payload(&raw_command);
         assert!(matches!(command, PjLinkCommand::Power1(PjLinkPowerCommandParameter::Query)));
     }
 
     #[test]
     fn it_converts_1powr_on_to_powr_on_enum() {
-        let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'1']);
+        let raw_command = PjLinkRawPayload::new_command(*b"1POWR", vec![b'1']);
         let command = PjLinkCommand::from_raw_payload(&raw_command);
         assert!(matches!(command, PjLinkCommand::Power1(PjLinkPowerCommandParameter::On)));
     }
 
     #[test]
     fn it_converts_1powr_off_to_powr_off_enum() {
-        let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'0']);
+        let raw_command = PjLinkRawPayload::new_command(*b"1POWR", vec![b'0']);
         let command = PjLinkCommand::from_raw_payload(&raw_command);
         assert!(matches!(command, PjLinkCommand::Power1(PjLinkPowerCommandParameter::Off)));
     }
 
     #[test]
     fn it_converts_1powr_garbage_to_powr_unknown_enum() {
-        let raw_command = PjLinkRawPayload::new_command(b'1', *b"POWR", vec![b'b', b'2']);
+        let raw_command = PjLinkRawPayload::new_command(*b"1POWR", vec![b'b', b'2']);
         let command = PjLinkCommand::from_raw_payload(&raw_command);
         assert!(matches!(command, PjLinkCommand::Power1(PjLinkPowerCommandParameter::Unknown)));
     }
