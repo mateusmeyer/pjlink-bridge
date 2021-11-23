@@ -158,7 +158,7 @@ impl PjLinkMockProjector {
 
 impl PjLinkHandler for PjLinkMockProjector{
 
-    fn handle_command(&mut self, command: PjLinkCommand, _raw_command: &PjLinkRawPayload) -> PjLinkResponse {
+    fn handle_command(&mut self, command: PjLinkCommand, _raw_command: &PjLinkRawPayload, _connection_id: &u64) -> PjLinkResponse {
         match command {
             // #region Power Control Instruction / POWR
             PjLinkCommand::Power1(PjLinkPowerCommandParameter::Query) => {
@@ -405,7 +405,7 @@ impl PjLinkHandler for PjLinkMockProjector{
         }
     }
 
-    fn get_password(&mut self) -> Option<String> {
+    fn get_password(&mut self, _connection_id: &u64) -> Option<String> {
         self.options.password.clone()
     }
 }
