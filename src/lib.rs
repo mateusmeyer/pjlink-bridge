@@ -173,7 +173,6 @@ lazy_static! {
     static ref PJLINK_RESPONSE_TRANSMISSION_PARAMETER_OK_VEC: Vec<u8> = PJLINK_RESPONSE_TRANSMISSION_PARAMETER_OK.to_vec();
     static ref PJLINK_RESPONSE_TRANSMISSION_PARAMETER_OK_VEC_HASH: u64 = {
         let mut hasher = DefaultHasher::new();
-        println!("hash");
         PJLINK_RESPONSE_TRANSMISSION_PARAMETER_OK_VEC.hash(&mut hasher);
         hasher.finish()
     };
